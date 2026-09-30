@@ -1181,9 +1181,8 @@ def main():
             "-s", f"{W}x{H}", "-r", str(FPS),
             "-i", "-",
             "-c:v", "libx264", "-preset", "medium", "-crf", "16",
-            "-tune", "animation",
-            "-pix_fmt", "yuv420p", "-g", "120",
-            "-bf", "2", "-b_adapt", "1",
+            "-pix_fmt", "yuv420p", "-g", "60",
+            "-bf", "0", "-flags", "+cgop",
             out_seg
         ]
         
