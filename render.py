@@ -114,10 +114,32 @@ def ease_out(x):
     x = clamp(x)
     return 1.0 - (1.0 - x) ** 3
 
+def ease_in_out(x):
+    x = clamp(x)
+    if x < 0.5:
+        return 4.0 * x * x * x
+    return 1.0 - ((-2.0 * x + 2.0) ** 3) / 2.0
+
+def elastic_out(x):
+    x = clamp(x)
+    if x <= 0.0 or x >= 1.0:
+        return x
+    c4 = (2.0 * math.pi) / 3.0
+    return (2.0 ** (-10.0 * x)) * math.sin((x * 10.0 - 0.75) * c4) + 1.0
+
+def spring_out(x):
+    x = clamp(x)
+    return 1.0 - math.cos(x * math.pi * 0.5) * math.exp(-x * 5.0)
+
 def smooth_step(t, a, b):
     if b <= a:
         return 1.0 if t >= b else 0.0
     return ease_out((t - a) / (b - a))
+
+def smooth_step_elastic(t, a, b):
+    if b <= a:
+        return 1.0 if t >= b else 0.0
+    return elastic_out((t - a) / (b - a))
 
 def bounce_out(x):
     x = clamp(x)
@@ -196,38 +218,52 @@ def draw_card_panel(draw, bbox, alpha=1.0, border_color=BORDER_RGB, border_width
     border_c = (border_color[0], border_color[1], border_color[2], int(255 * a))
     draw_round_rect(draw, bbox, radius=18, fill=fill_c, outline=border_c, width=border_width)
 
-# 5. Background Generation (Precomputed Static Layer with Glow Grid)
+# 5. Background Generation (Precomputed Static Layer with Rich Glow Grid)
 def make_background():
     img = Image.new("RGBA", (W, H), hex_to_rgba(COLORS["bg"]))
     d = ImageDraw.Draw(img)
     
-    # Grid lines
+    # Grid lines with subtle depth gradient (brighter near center)
     grid_gap = 64
-    grid_color = (20, 32, 50, 90)
+    cx_g, cy_g = W / 2.0, H / 2.0
+    max_dist = math.sqrt(cx_g**2 + cy_g**2)
     for x in range(0, W + 1, grid_gap):
-        d.line([(x, 0), (x, H)], fill=grid_color, width=1)
+        dist = abs(x - cx_g) / cx_g
+        alpha = int(50 + 60 * (1.0 - dist))
+        d.line([(x, 0), (x, H)], fill=(20, 38, 62, alpha), width=1)
     for y in range(0, H + 1, grid_gap):
-        d.line([(0, y), (W, y)], fill=grid_color, width=1)
+        dist = abs(y - cy_g) / cy_g
+        alpha = int(50 + 60 * (1.0 - dist))
+        d.line([(0, y), (W, y)], fill=(20, 38, 62, alpha), width=1)
         
-    # Subtle radial teal & rose ambient lighting
-    # Top-right glow
+    # Stronger radial teal & rose ambient lighting for depth
+    # Top-right teal glow
     glow_teal = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d_gt = ImageDraw.Draw(glow_teal)
-    center_tr = (int(W * 0.75), int(H * 0.35))
-    d_gt.ellipse([center_tr[0] - 500, center_tr[1] - 500, center_tr[0] + 500, center_tr[1] + 500],
-                 fill=(112, 224, 214, 28))
-    glow_teal = glow_teal.filter(ImageFilter.GaussianBlur(140))
+    center_tr = (int(W * 0.72), int(H * 0.30))
+    d_gt.ellipse([center_tr[0] - 600, center_tr[1] - 600, center_tr[0] + 600, center_tr[1] + 600],
+                 fill=(112, 224, 214, 55))
+    glow_teal = glow_teal.filter(ImageFilter.GaussianBlur(160))
     
-    # Bottom-left glow
+    # Bottom-left rose glow
     glow_rose = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d_gr = ImageDraw.Draw(glow_rose)
-    center_bl = (int(W * 0.25), int(H * 0.75))
-    d_gr.ellipse([center_bl[0] - 450, center_bl[1] - 450, center_bl[0] + 450, center_bl[1] + 450],
-                 fill=(244, 144, 151, 20))
-    glow_rose = glow_rose.filter(ImageFilter.GaussianBlur(130))
+    center_bl = (int(W * 0.28), int(H * 0.72))
+    d_gr.ellipse([center_bl[0] - 550, center_bl[1] - 550, center_bl[0] + 550, center_bl[1] + 550],
+                 fill=(244, 144, 151, 40))
+    glow_rose = glow_rose.filter(ImageFilter.GaussianBlur(150))
+    
+    # Center gold accent glow
+    glow_gold = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d_gg = ImageDraw.Draw(glow_gold)
+    center_gc = (int(W * 0.5), int(H * 0.5))
+    d_gg.ellipse([center_gc[0] - 400, center_gc[1] - 400, center_gc[0] + 400, center_gc[1] + 400],
+                 fill=(255, 215, 0, 18))
+    glow_gold = glow_gold.filter(ImageFilter.GaussianBlur(180))
     
     img = Image.alpha_composite(img, glow_teal)
     img = Image.alpha_composite(img, glow_rose)
+    img = Image.alpha_composite(img, glow_gold)
     return img
 
 BACKGROUND_LAYER = make_background()
@@ -250,22 +286,30 @@ PRICE_MAX = max(x[1] for x in CANDLES) + 2.0
 def price_to_y(val, top=280, bottom=780):
     return bottom - (val - PRICE_MIN) / (PRICE_MAX - PRICE_MIN) * (bottom - top)
 
-# 7. Ambient Floating Quant Particles
+# 7. Ambient Floating Quant Particles (Enhanced Visibility & Variety)
 _pr = np.random.default_rng(77)
 PARTICLES = list(zip(
-    _pr.uniform(0, W, 65),
-    _pr.uniform(0, H, 65),
-    _pr.uniform(14, 38, 65),      # speed
-    _pr.uniform(2, 6, 65),        # radius
-    _pr.uniform(0, 2 * math.pi, 65),
-    _pr.choice([TEAL_RGB, ROSE_RGB, BLUE_RGB, GOLD_RGB], 65)
+    _pr.uniform(0, W, 85),
+    _pr.uniform(0, H, 85),
+    _pr.uniform(10, 42, 85),      # speed
+    _pr.uniform(2, 8, 85),        # radius
+    _pr.uniform(0, 2 * math.pi, 85),
+    _pr.choice([TEAL_RGB, ROSE_RGB, BLUE_RGB, GOLD_RGB], 85),
+    _pr.uniform(0.6, 1.0, 85)     # brightness multiplier
 ))
 
 def draw_particles(draw, t):
-    for x0, y0, sp, r, ph, col in PARTICLES:
+    for x0, y0, sp, r, ph, col, bri in PARTICLES:
         y = (y0 - t * sp) % H
-        x = (x0 + math.sin(t * 0.4 + ph) * 20.0) % W
-        alpha = int((0.15 + 0.35 * (0.5 + 0.5 * math.sin(t * 2.5 + ph))) * 255)
+        x = (x0 + math.sin(t * 0.4 + ph) * 28.0) % W
+        # Enhanced alpha range (0.25 - 0.65) for much better visibility
+        alpha = int((0.25 + 0.40 * (0.5 + 0.5 * math.sin(t * 2.5 + ph))) * 255 * bri)
+        # Soft glow ring around larger particles
+        if r > 4.5:
+            glow_r = r * 2.2
+            glow_a = int(alpha * 0.25)
+            draw.ellipse([x - glow_r, y - glow_r, x + glow_r, y + glow_r],
+                         fill=(col[0], col[1], col[2], glow_a))
         draw.ellipse([x - r, y - r, x + r, y + r], fill=(col[0], col[1], col[2], alpha))
 
 # 8. Load Lip-sync Data
@@ -280,77 +324,133 @@ def get_mouth_val(t):
         return float(MOUTH[idx])
     return 0.0
 
-# 9. Animated Cyber-Quant Sentinel Character & HUD
+# 9. Animated Cyber-Quant Sentinel Character & HUD (Enhanced with breathing, dual arms, head bob)
 def draw_quant_sentinel(draw, t, mouth_val, x, y, scale=1.0, scene_idx=0):
     """
     Renders ALGENZA's signature institutional Quant Sentinel / AI Trader Avatar.
-    Features audio-reactive glowing visor, holographic rings, and circuit lines.
+    Features: breathing idle, head bob, audio-reactive visor, dual arms, holographic rings.
     """
     s = scale
     m = clamp(mouth_val)
     
-    # Ambient holographic ring around sentinel
-    ring_r = int(140 * s)
-    pulse = 1.0 + 0.05 * math.sin(t * 4.0)
-    draw.ellipse([x - ring_r * pulse, y - ring_r * pulse, x + ring_r * pulse, y + ring_r * pulse],
-                 outline=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], 40), width=int(2 * s))
+    # --- Breathing idle animation (subtle scale oscillation) ---
+    breath = 1.0 + 0.012 * math.sin(t * 1.8)
+    s_b = s * breath  # breathing-affected scale
     
-    # Shoulders & Institutional Jacket
-    shoulder_w = int(130 * s)
-    shoulder_h = int(90 * s)
-    draw_round_rect(draw, [x - shoulder_w, y + int(45 * s), x + shoulder_w, y + int(45 * s) + shoulder_h],
-                    radius=int(22 * s), fill=(PANEL_RGB[0], PANEL_RGB[1], PANEL_RGB[2], 250),
+    # --- Head bob synced to audio energy ---
+    head_bob_y = -int(3.5 * m * math.sin(t * 12.0) * s)
+    
+    # Ambient holographic rings (dual pulsing)
+    for ring_idx in range(2):
+        ring_r = int((140 + ring_idx * 30) * s)
+        pulse = 1.0 + 0.06 * math.sin(t * (3.5 + ring_idx * 1.2) + ring_idx * 1.5)
+        ring_alpha = int(max(0, min(255, (50 - ring_idx * 15))))
+        draw.ellipse([x - ring_r * pulse, y - ring_r * pulse, x + ring_r * pulse, y + ring_r * pulse],
+                     outline=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], ring_alpha), width=int((2 - ring_idx * 0.5) * s))
+    
+    # Floating holographic data particles around sentinel
+    for pk in range(6):
+        p_angle = t * 1.5 + pk * (math.pi * 2.0 / 6)
+        p_r = int((110 + 20 * math.sin(t * 2.0 + pk)) * s)
+        px = x + int(p_r * math.cos(p_angle))
+        py = y + int(p_r * 0.5 * math.sin(p_angle))
+        p_alpha = int(40 + 30 * (0.5 + 0.5 * math.sin(t * 3.0 + pk * 1.2)))
+        p_size = int(3 * s)
+        draw.ellipse([px - p_size, py - p_size, px + p_size, py + p_size],
+                     fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], p_alpha))
+    
+    # Shoulders & Institutional Jacket (with breathing scale)
+    shoulder_w = int(130 * s_b)
+    shoulder_h = int(90 * s_b)
+    draw_round_rect(draw, [x - shoulder_w, y + int(45 * s_b), x + shoulder_w, y + int(45 * s_b) + shoulder_h],
+                    radius=int(22 * s_b), fill=(PANEL_RGB[0], PANEL_RGB[1], PANEL_RGB[2], 250),
                     outline=(BORDER_RGB[0], BORDER_RGB[1], BORDER_RGB[2], 255), width=int(3 * s))
     
     # Signature ALGENZA Tie / Core polygon badge
-    draw_algenza_logo_mark(draw, x, y + int(75 * s), size=int(34 * s), alpha=0.95)
+    draw_algenza_logo_mark(draw, x, y + int(75 * s_b), size=int(34 * s_b), alpha=0.95)
     
-    # Head & Mask
-    head_w = int(80 * s)
-    head_h = int(95 * s)
-    head_box = [x - head_w, y - head_h, x + head_w, y + int(40 * s)]
-    draw_round_rect(draw, head_box, radius=int(28 * s),
+    # Head & Mask (with head bob)
+    head_w = int(80 * s_b)
+    head_h = int(95 * s_b)
+    hy = y + head_bob_y
+    head_box = [x - head_w, hy - head_h, x + head_w, hy + int(40 * s_b)]
+    draw_round_rect(draw, head_box, radius=int(28 * s_b),
                     fill=(COLORS["bg_alt"] if isinstance(COLORS["bg_alt"], tuple) else hex_to_rgb(COLORS["bg_alt"])),
                     outline=(BORDER_RGB[0], BORDER_RGB[1], BORDER_RGB[2], 255), width=int(3 * s))
     
-    # Cybernetic Glowing Visor (Eyes / Holographic Display)
-    visor_w = int(62 * s)
-    visor_h = int(22 * s)
-    visor_y = y - int(25 * s)
+    # Cybernetic Glowing Visor with outer glow
+    visor_w = int(62 * s_b)
+    visor_h = int(22 * s_b)
+    visor_y = hy - int(25 * s_b)
     visor_box = [x - visor_w, visor_y - visor_h, x + visor_w, visor_y + visor_h]
     
-    # Visor Glow & Fill
+    # Outer visor glow
+    glow_expand = int(6 * s)
+    visor_glow_alpha = int(35 + 25 * m)
+    draw_round_rect(draw, [x - visor_w - glow_expand, visor_y - visor_h - glow_expand,
+                           x + visor_w + glow_expand, visor_y + visor_h + glow_expand],
+                    radius=int(14 * s), fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], visor_glow_alpha))
+    
+    # Visor Fill
     draw_round_rect(draw, visor_box, radius=int(10 * s), fill=(10, 24, 38, 255),
                     outline=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], 255), width=int(2 * s))
     
-    # Visor internal holographic scanline / waveform
-    scan_x = x - int(50 * s)
-    scan_w = int(100 * s)
-    for k in range(9):
-        bar_x = scan_x + k * (scan_w / 8.0)
-        bar_h = int((6 + 18 * m * math.sin(k * 0.8 + t * 8.0) ** 2) * s)
+    # Visor holographic waveform (enhanced: more bars, smoother)
+    scan_x = x - int(50 * s_b)
+    scan_w = int(100 * s_b)
+    n_bars = 12
+    for k in range(n_bars):
+        bar_x = scan_x + k * (scan_w / (n_bars - 1.0))
+        # Complex waveform: main + harmonic
+        wave = math.sin(k * 0.7 + t * 8.0) ** 2 + 0.3 * math.sin(k * 1.4 + t * 12.0) ** 2
+        bar_h = int((4 + 20 * m * wave) * s_b)
+        bar_alpha = int(180 + 70 * m)
         draw.line([(bar_x, visor_y - bar_h / 2), (bar_x, visor_y + bar_h / 2)],
-                  fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], 230), width=int(2 * s))
+                  fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], bar_alpha), width=int(2.5 * s))
                   
-    # Audio-Reactive Mouth (Frequency Aperture)
-    mouth_w = int((30 - 6 * m) * s)
-    mouth_h = int((4 + 26 * m) * s)
-    mouth_y = y + int(14 * s)
-    draw_round_rect(draw, [x - mouth_w / 2, mouth_y, x + mouth_w / 2, mouth_y + mouth_h],
+    # Audio-Reactive Mouth (enhanced with glow)
+    mouth_w = int((30 - 6 * m) * s_b)
+    mouth_h = int((4 + 26 * m) * s_b)
+    mouth_y_pos = hy + int(14 * s_b)
+    # Mouth glow
+    if m > 0.1:
+        mg_expand = int(4 * s * m)
+        draw_round_rect(draw, [x - mouth_w / 2 - mg_expand, mouth_y_pos - mg_expand,
+                               x + mouth_w / 2 + mg_expand, mouth_y_pos + mouth_h + mg_expand],
+                        radius=int(max(2, min(mouth_w, mouth_h) / 2) + mg_expand),
+                        fill=(ROSE_RGB[0], ROSE_RGB[1], ROSE_RGB[2], int(60 * m)))
+    draw_round_rect(draw, [x - mouth_w / 2, mouth_y_pos, x + mouth_w / 2, mouth_y_pos + mouth_h],
                     radius=int(max(2, min(mouth_w, mouth_h) / 2)),
                     fill=(ROSE_RGB[0], ROSE_RGB[1], ROSE_RGB[2], int(180 + 75 * m)))
                     
-    # Dynamic Hand / Pointer
-    # In scenes 0, 3, 4, 7 pointing towards data; in scene 2 & 8 waving/welcoming
-    arm_angle = -0.7 + 0.15 * math.sin(t * 3.0) if scene_idx in (2, 8) else 0.5 + 0.08 * math.sin(t * 2.0)
-    arm_x = x + int(70 * s)
-    arm_y = y + int(50 * s)
-    end_x = arm_x + int(60 * s * math.cos(arm_angle))
-    end_y = arm_y + int(60 * s * math.sin(arm_angle))
-    draw.line([(arm_x, arm_y), (end_x, end_y)],
+    # --- Dual Arms with context-dependent gestures ---
+    # Right arm (primary)
+    if scene_idx in (2, 8):
+        r_arm_angle = -0.65 + 0.18 * math.sin(t * 2.8)
+    else:
+        r_arm_angle = 0.45 + 0.10 * math.sin(t * 2.0)
+    r_arm_x = x + int(70 * s_b)
+    r_arm_y = y + int(50 * s_b)
+    r_end_x = r_arm_x + int(65 * s_b * math.cos(r_arm_angle))
+    r_end_y = r_arm_y + int(65 * s_b * math.sin(r_arm_angle))
+    draw.line([(r_arm_x, r_arm_y), (r_end_x, r_end_y)],
               fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], 240), width=int(7 * s))
-    draw.ellipse([end_x - int(7 * s), end_y - int(7 * s), end_x + int(7 * s), end_y + int(7 * s)],
+    draw.ellipse([r_end_x - int(7 * s), r_end_y - int(7 * s), r_end_x + int(7 * s), r_end_y + int(7 * s)],
                  fill=TEXT_RGB)
+    
+    # Left arm (secondary, more subtle)
+    if scene_idx in (2, 8):
+        l_arm_angle = math.pi + 0.65 - 0.15 * math.sin(t * 2.8 + 0.5)
+    else:
+        l_arm_angle = math.pi - 0.35 - 0.06 * math.sin(t * 1.8 + 1.0)
+    l_arm_x = x - int(70 * s_b)
+    l_arm_y = y + int(50 * s_b)
+    l_end_x = l_arm_x + int(55 * s_b * math.cos(l_arm_angle))
+    l_end_y = l_arm_y + int(55 * s_b * math.sin(l_arm_angle))
+    draw.line([(l_arm_x, l_arm_y), (l_end_x, l_end_y)],
+              fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], 200), width=int(6 * s))
+    draw.ellipse([l_end_x - int(6 * s), l_end_y - int(6 * s), l_end_x + int(6 * s), l_end_y + int(6 * s)],
+                 fill=(TEXT_RGB[0], TEXT_RGB[1], TEXT_RGB[2], 200))
 
 # 10. The 9 Dedicated Scenes for ALGENZA
 def scene_0(draw, t):
@@ -373,6 +473,15 @@ def scene_0(draw, t):
     num_candles = len(CANDLES)
     candle_w = (chart_right - chart_left - 80) / num_candles
     
+    # Price Axis Labels (Y-axis)
+    n_labels = 6
+    for lbl_i in range(n_labels):
+        price_val = PRICE_MIN + (PRICE_MAX - PRICE_MIN) * lbl_i / (n_labels - 1)
+        label_y = price_to_y(price_val, chart_top + 70, chart_bottom - 50)
+        draw_text(draw, f"{price_val:.1f}", chart_left + 10, label_y - 10, "m", 16, MUTED_RGB)
+        draw.line([(chart_left + 70, label_y), (chart_right - 20, label_y)],
+                  fill=(BORDER_RGB[0], BORDER_RGB[1], BORDER_RGB[2], 60), width=1)
+    
     curve_pts = []
     for k, (o, h, l, c) in enumerate(CANDLES):
         t_cand = cand_t(k)
@@ -388,6 +497,13 @@ def scene_0(draw, t):
         yo = price_to_y(o, chart_top + 70, chart_bottom - 50)
         yc = yo + (price_to_y(c, chart_top + 70, chart_bottom - 50) - yo) * g
         
+        # Candle glow effect for latest candle
+        if k == len(CANDLES) - 1 and g > 0.5:
+            glow_alpha = int(30 * g)
+            bw_glow = max(6, candle_w * 0.9)
+            draw_round_rect(draw, [cx - bw_glow / 2, min(yo, yc) - 4, cx + bw_glow / 2, max(yo, yc) + 4],
+                            radius=5, fill=(col[0], col[1], col[2], glow_alpha))
+        
         # Wick
         draw.line([(cx, yh), (cx, yl)], fill=col, width=2)
         # Body
@@ -400,10 +516,21 @@ def scene_0(draw, t):
         
         curve_pts.append((cx, yc))
         
-    # Moving Average Curve
+    # Moving Average Curve with gradient alpha
     if len(curve_pts) > 1:
         for j in range(len(curve_pts) - 1):
-            draw.line([curve_pts[j], curve_pts[j + 1]], fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], 180), width=3)
+            seg_alpha = int(120 + 60 * (j / len(curve_pts)))
+            draw.line([curve_pts[j], curve_pts[j + 1]],
+                      fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], seg_alpha), width=3)
+    
+    # Live price indicator (blinking dot at last candle)
+    if len(curve_pts) > 0:
+        last_pt = curve_pts[-1]
+        blink = 0.5 + 0.5 * math.sin(t * 8.0)
+        dot_alpha = int(160 + 95 * blink)
+        draw.ellipse([last_pt[0] - 6, last_pt[1] - 6, last_pt[0] + 6, last_pt[1] + 6],
+                     fill=(GREEN_RGB[0], GREEN_RGB[1], GREEN_RGB[2], dot_alpha))
+        draw_text(draw, f"${CANDLES[-1][3]:.2f}", last_pt[0] + 14, last_pt[1] - 10, "mb", 18, GREEN_RGB)
 
 def scene_1(draw, t):
     """Scene 1: The Dilemma - 24/7 Market Exhaustion & Missed Entries"""
@@ -829,10 +956,18 @@ def scene_7(draw, t):
             draw_text(draw, met["num"], x + card_w / 2, y + 170, "h", 68, hex_to_rgb(met["color"]), alpha=g, align="c")
             draw_text(draw, met["label"], x + card_w / 2, y + 270, "b", 24, TEXT_RGB, alpha=g, align="c")
             
-            # Five golden stars
+            # Five golden 5-pointed stars
             for s_idx in range(5):
-                star_x = x + card_w / 2 - 80 + s_idx * 40
-                draw.ellipse([star_x - 10, y + 360 - 10, star_x + 10, y + 360 + 10], fill=GOLD_RGB)
+                star_cx = x + card_w / 2 - 80 + s_idx * 40
+                star_cy = y + 360
+                star_r_out = 12
+                star_r_in = 5
+                star_pts = []
+                for sp in range(10):
+                    angle = -math.pi / 2 + sp * math.pi / 5
+                    r = star_r_out if sp % 2 == 0 else star_r_in
+                    star_pts.append((star_cx + r * math.cos(angle), star_cy + r * math.sin(angle)))
+                draw.polygon(star_pts, fill=GOLD_RGB)
             draw_text(draw, "5.0 Verified Rating", x + card_w / 2, y + 405, "mb", 20, GOLD_RGB, alpha=g, align="c")
     else:
         # Vertical 9:16 layout
@@ -945,20 +1080,50 @@ def draw_watermark(draw, t):
     draw_text(draw, "ALGENZA", wx + 52, wy + 8, "h", 26, TEXT_RGB, alpha=a)
     draw_text(draw, "PRO", wx + 190, wy + 11, "mb", 16, TEAL_RGB, alpha=a)
 
-# 13. Master Frame Renderer
+# 13. Master Frame Renderer (with Scene Crossfade Transitions)
 def render_frame(frame_idx):
     t = frame_idx / float(FPS)
     img = BACKGROUND_LAYER.copy()
     draw = ImageDraw.Draw(img)
     
+    # Animated grid pulse overlay (subtle depth effect)
+    grid_pulse = 0.5 + 0.5 * math.sin(t * 0.6)
+    grid_pulse_alpha = int(15 * grid_pulse)
+    if grid_pulse_alpha > 2:
+        # Vertical scan line sweeping across the frame
+        scan_x = int((t * 80) % (W + 200)) - 100
+        for dx in range(-60, 61, 4):
+            line_alpha = int(grid_pulse_alpha * max(0, 1.0 - abs(dx) / 60.0))
+            if 0 <= scan_x + dx < W:
+                draw.line([(scan_x + dx, 0), (scan_x + dx, H)],
+                          fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], line_alpha), width=1)
+    
     # Floating ambient particles
     draw_particles(draw, t)
     
-    # Active Scene Rendering
+    # Active Scene Rendering with Crossfade Transitions
     for i in range(NS):
         if not (SS[i] - 0.05 <= t <= SE[i] + 0.08):
             continue
-        SCENES[i](draw, t)
+        
+        # Scene entry fade-in (smooth blend instead of hard cut)
+        fade_in_alpha = clamp((t - SS[i]) / 0.45, 0.0, 1.0) if i > 0 else 1.0
+        # Scene exit fade-out
+        fade_out_alpha = clamp((SE[i] - t) / 0.35, 0.0, 1.0) if i < NS - 1 else 1.0
+        scene_alpha = min(fade_in_alpha, fade_out_alpha)
+        
+        if scene_alpha < 0.999 and scene_alpha > 0.01:
+            # Render scene to separate layer for alpha compositing
+            scene_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            scene_draw = ImageDraw.Draw(scene_layer)
+            SCENES[i](scene_draw, t)
+            # Apply scene alpha
+            alpha_mask = scene_layer.split()[3]
+            alpha_mask = alpha_mask.point(lambda p: int(p * scene_alpha))
+            scene_layer.putalpha(alpha_mask)
+            img = Image.alpha_composite(img, scene_layer)
+        else:
+            SCENES[i](draw, t)
         
     # Sentinel HUD Character Positioning
     # In 16:9, positioned on right; in 9:16 positioned near bottom/mid
@@ -1015,8 +1180,10 @@ def main():
             "-f", "rawvideo", "-pix_fmt", "rgba",
             "-s", f"{W}x{H}", "-r", str(FPS),
             "-i", "-",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "16",
+            "-tune", "animation",
             "-pix_fmt", "yuv420p", "-g", "120",
+            "-bf", "2", "-b_adapt", "1",
             out_seg
         ]
         
@@ -1038,8 +1205,10 @@ def main():
             "-f", "rawvideo", "-pix_fmt", "rgba",
             "-s", f"{W}x{H}", "-r", str(FPS),
             "-i", "-",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "16",
+            "-tune", "animation",
             "-pix_fmt", "yuv420p", "-g", "120",
+            "-bf", "2", "-b_adapt", "1",
             out_file
         ]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
