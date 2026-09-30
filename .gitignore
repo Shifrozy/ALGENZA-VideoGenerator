@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.venv/
+env/
+venv/
+
+# Audio & Video Render Outputs (Generated Pipeline Artifacts)
+*.wav
+*.mp4
+!assets/*.mp4
+mouth.npy
+tts.json
+list*.txt
+seg*.mp4
+still_*.png
+test_*.png
+out.txt
+res.txt
+
+# Model binaries (downloaded on demand)
+*.onnx
+*.bin
+
+# OS
+.DS_Store
+Thumbs.db
