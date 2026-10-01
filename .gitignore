@@ -28,3 +28,6 @@ res.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Reference repos
+teamnak-video-engine/

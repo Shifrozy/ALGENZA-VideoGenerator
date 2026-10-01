@@ -1,7 +1,12 @@
 """
-ALGENZA Video Engine - Universal Multi-Format Frame Renderer
-Renders 60fps explainer video for algenza.com in 16:9, 9:16, or 1:1 aspect ratios.
-Streams frames directly into FFmpeg for parallel or full video encoding.
+ALGENZA Video Engine - Primary Multi-Format Frame Renderer
+Faithfully renders 60fps explainer video for algenza.com across all major social media & web formats:
+- 16:9 Landscape (1920x1080): YouTube, Web, LinkedIn, Twitter/X
+- 9:16 Vertical  (1080x1920): TikTok, Instagram Reels, YouTube Shorts
+- 1:1  Square    (1080x1080): Instagram Feed, LinkedIn Feed, Twitter/X Post
+- 4:5  Portrait  (1080x1350): Instagram Portrait Feed, Facebook Post
+
+Powered by pure-Python Skia engine with zero native crashes on Windows.
 """
 
 import os
@@ -10,7 +15,9 @@ import math
 import re
 import subprocess
 import io
+import numpy as np
 
+# Ensure UTF-8 output on Windows
 if sys.platform == "win32":
     try:
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -18,1207 +25,1018 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import skia
 from tl import *
-from engine.config import (
-    COLORS, BRAND_NAME, BRAND_TAG, BRAND_SLOGAN, BRAND_DISPLAY_URL,
-    WHATSAPP_NUMBER, FOUNDER_NAME, FOUNDER_ROLE, PRODUCTS, METRICS, hex_to_rgb, hex_to_rgba
-)
 
-# 1. Video Resolution & Aspect Ratio Setup
-ASPECT = os.environ.get("ASPECT", "16:9").strip()
-if ASPECT == "9:16":
-    W, H = 1080, 1920
-    IS_VERTICAL = True
-elif ASPECT == "1:1":
-    W, H = 1080, 1080
-    IS_VERTICAL = False
-else:
-    W, H = 1920, 1080
-    IS_VERTICAL = False
-
-FPS = 60
-
-# Discover FFmpeg executable
+# 1. Discover FFmpeg Executable
 try:
     import imageio_ffmpeg
     FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
 except Exception:
     FFMPEG_EXE = "ffmpeg"
 
-# 2. Font Loading with Robust System Fallbacks
-FONT_CACHE = {}
+# 2. Aspect Ratio & Resolution Configuration
+ASPECT = os.environ.get("ASPECT", "16:9").strip().lower()
+if ASPECT in ("9:16", "vertical", "reels", "shorts", "tiktok"):
+    W, H = 1080, 1920
+    MODE = "9:16"
+elif ASPECT in ("1:1", "square", "instagram"):
+    W, H = 1080, 1080
+    MODE = "1:1"
+elif ASPECT in ("4:5", "portrait", "feed"):
+    W, H = 1080, 1350
+    MODE = "4:5"
+else:
+    W, H = 1920, 1080
+    MODE = "16:9"
 
-def get_font_paths():
-    paths = []
-    # Windows system fonts
-    win_fonts = r"C:\Windows\Fonts"
-    if os.path.exists(win_fonts):
-        paths.append(win_fonts)
-    # Local assets fonts
-    local_fonts = os.path.join(os.path.dirname(__file__), "assets", "fonts")
-    if os.path.exists(local_fonts):
-        paths.append(local_fonts)
-    # Linux system fonts
-    for p in ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/truetype/msttcorefonts"]:
-        if os.path.exists(p):
-            paths.append(p)
-    return paths
+IS_LAND = (MODE == "16:9")
+IS_VERT = (MODE == "9:16")
+IS_SQUARE = (MODE == "1:1")
+IS_PORT = (MODE == "4:5")
 
-FONT_PATHS = get_font_paths()
+FPS = 60
 
-def find_font_file(filenames):
-    for base in FONT_PATHS:
-        for fn in filenames:
-            p = os.path.join(base, fn)
-            if os.path.exists(p):
-                return p
-    return None
+# 3. Fonts Setup (Robust System & Cross-Platform Fallbacks)
+FD = os.environ.get('FD', '/usr/share/fonts/truetype/')
+HF = FD + 'higgsfield/Montserrat-ExtraBold.ttf'
+if not os.path.exists(HF): HF = FD + 'dejavu/DejaVuSans-Bold.ttf'
 
-FONT_FILES = {
-    "h": find_font_file(["segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"]),
-    "b": find_font_file(["segoeui.ttf", "arial.ttf", "DejaVuSans.ttf"]),
-    "bb": find_font_file(["segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"]),
-    "m": find_font_file(["consolab.ttf", "consola.ttf", "DejaVuSansMono.ttf"]),
-    "mb": find_font_file(["consolab.ttf", "DejaVuSansMono-Bold.ttf"]),
-    "lg": find_font_file(["segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"])
+TF = {
+    'h': skia.Typeface.MakeFromFile(HF),
+    'b': skia.Typeface.MakeFromFile(FD + 'dejavu/DejaVuSans.ttf'),
+    'bb': skia.Typeface.MakeFromFile(FD + 'dejavu/DejaVuSans-Bold.ttf'),
+    'm': skia.Typeface.MakeFromFile(FD + 'dejavu/DejaVuSansMono.ttf'),
+    'mb': skia.Typeface.MakeFromFile(FD + 'dejavu/DejaVuSansMono-Bold.ttf'),
+    'lg': skia.Typeface.MakeFromFile(FD + 'higgsfield/Inter-Bold.ttf')
 }
 
-def get_font(key, size):
-    size = int(size)
-    cache_key = (key, size)
-    if cache_key in FONT_CACHE:
-        return FONT_CACHE[cache_key]
-    
-    font_path = FONT_FILES.get(key)
-    if font_path and os.path.exists(font_path):
-        try:
-            f = ImageFont.truetype(font_path, size)
-            FONT_CACHE[cache_key] = f
-            return f
-        except Exception:
-            pass
-    try:
-        f = ImageFont.load_default()
-        FONT_CACHE[cache_key] = f
-        return f
-    except Exception:
-        return None
+FC = {}
+def F(k, s):
+    s = int(s)
+    if (k, s) not in FC:
+        FC[(k, s)] = skia.Font(TF[k], s)
+    return FC[(k, s)]
 
-# 3. Easing & Math Interpolation Utilities
-def clamp(x, lo=0.0, hi=1.0):
-    return max(lo, min(hi, x))
+# 4. Brand Color Palette (Clean Minimalist Cyber-Quant Palette)
+G = '#3FCB90'       # Algenza Emerald
+CYAN = '#00E5FF'    # Algenza Quantum Accent Cyan
+WH = '#F1F3F6'      # Crisp White
+MU = '#8B9A92'      # Muted Slate
+RD = '#EF4444'      # Missed / Sell Red
+PN = '#11151C'      # Deep Panel Black
+LN = '#252C38'      # Panel Border Gray
+DK = '#07251A'      # Dark Pupil / Visor Tint
 
-def ease_out(x):
-    x = clamp(x)
-    return 1.0 - (1.0 - x) ** 3
+def P(h, a=1.0, sw=0):
+    h = h.lstrip('#')
+    a = max(0.0, min(1.0, a))
+    p = skia.Paint(AntiAlias=True, Color=skia.Color(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), int(a * 255)))
+    if sw:
+        p.setStyle(skia.Paint.kStroke_Style)
+        p.setStrokeWidth(sw)
+        p.setStrokeCap(skia.Paint.kRound_Cap)
+        p.setStrokeJoin(skia.Paint.kRound_Join)
+    return p
 
-def ease_in_out(x):
-    x = clamp(x)
-    if x < 0.5:
-        return 4.0 * x * x * x
-    return 1.0 - ((-2.0 * x + 2.0) ** 3) / 2.0
+def GL(h, a, sw=0, sig=12):
+    p = P(h, a, sw)
+    p.setMaskFilter(skia.MaskFilter.MakeBlur(skia.kNormal_BlurStyle, sig))
+    return p
 
-def elastic_out(x):
-    x = clamp(x)
-    if x <= 0.0 or x >= 1.0:
-        return x
-    c4 = (2.0 * math.pi) / 3.0
-    return (2.0 ** (-10.0 * x)) * math.sin((x * 10.0 - 0.75) * c4) + 1.0
+def dash(a):
+    p = P(MU, a, 2)
+    p.setPathEffect(skia.DashPathEffect.Make([10, 8], 0))
+    return p
 
-def spring_out(x):
-    x = clamp(x)
-    return 1.0 - math.cos(x * math.pi * 0.5) * math.exp(-x * 5.0)
-
-def smooth_step(t, a, b):
-    if b <= a:
-        return 1.0 if t >= b else 0.0
-    return ease_out((t - a) / (b - a))
-
-def smooth_step_elastic(t, a, b):
-    if b <= a:
-        return 1.0 if t >= b else 0.0
-    return elastic_out((t - a) / (b - a))
-
-def bounce_out(x):
-    x = clamp(x)
+def cl(x): return 0.0 if x < 0 else 1.0 if x > 1 else x
+def eo(x): x = cl(x); return 1 - (1 - x) ** 3
+def sm(t, a, b): return eo((t - a) / (b - a))
+def bo(x):
+    x = cl(x)
     c1 = 1.70158
-    c3 = c1 + 1.0
-    return 1.0 + c3 * ((x - 1.0) ** 3) + c1 * ((x - 1.0) ** 2)
+    c3 = c1 + 1
+    return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2
 
-# 4. Drawing Helpers
-TEAL_RGB = hex_to_rgb(COLORS["teal"])
-ROSE_RGB = hex_to_rgb(COLORS["rose"])
-GOLD_RGB = hex_to_rgb(COLORS["gold"])
-GREEN_RGB = hex_to_rgb(COLORS["green"])
-RED_RGB = hex_to_rgb(COLORS["red"])
-BLUE_RGB = hex_to_rgb(COLORS["blue"])
-TEXT_RGB = hex_to_rgb(COLORS["text"])
-MUTED_RGB = hex_to_rgb(COLORS["muted"])
-PANEL_RGB = hex_to_rgb(COLORS["panel"])
-BORDER_RGB = hex_to_rgb(COLORS["border"])
+def tx(c, s, x, y, k, sz, col=WH, a=1.0, al='l'):
+    f = F(k, sz)
+    w = f.measureText(s)
+    if al == 'c': x -= w / 2
+    elif al == 'r': x -= w
+    c.drawString(s, x, y, f, P(col, a))
+    return w
 
-def draw_round_rect(draw, bbox, radius, fill=None, outline=None, width=1):
-    x0, y0, x1, y1 = bbox
-    r = int(radius)
-    if r * 2 > (x1 - x0):
-        r = int((x1 - x0) / 2)
-    if r * 2 > (y1 - y0):
-        r = int((y1 - y0) / 2)
-    draw.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=fill, outline=outline, width=width)
+def logo(c, x, y, sz, a=1.0, al='l', glow=0.0):
+    f = F('lg', sz)
+    w1 = f.measureText("AL")
+    w2 = f.measureText("GENZA")
+    w = w1 + w2
+    if al == 'c': x -= w / 2
+    if glow > 0:
+        gp = P(G, glow * a)
+        gp.setMaskFilter(skia.MaskFilter.MakeBlur(skia.kNormal_BlurStyle, sz * 0.12))
+        c.drawString("AL", x, y, f, gp)
+    c.drawString("AL", x, y, f, P(G, a))
+    c.drawString("GENZA", x + w1, y, f, P(WH, a))
+    return w
 
-def draw_text(draw, s, x, y, font_key, size, color=TEXT_RGB, alpha=1.0, align="l"):
-    font = get_font(font_key, size)
-    bbox = draw.textbbox((0, 0), s, font=font)
-    w = bbox[2] - bbox[0]
-    h = bbox[3] - bbox[1]
+def rr(c, l, t, r, b, rad, p):
+    c.drawRRect(skia.RRect.MakeRectXY(skia.Rect.MakeLTRB(l, t, r, b), rad, rad), p)
+
+def panel(c, l, t, r, b, a=1):
+    rr(c, l, t, r, b, 18, P(PN, 0.92 * a))
+    rr(c, l, t, r, b, 18, P(LN, a, 2))
+
+CUR = [0.0, 0.0]
+def head(c, s, x, y, a, sz=64):
+    f = F('h', sz)
+    sp = f.measureText(' ')
+    for k, wd in enumerate(s.split()):
+        g = sm(CUR[0], CUR[1] + 0.05 + k * 0.09, CUR[1] + 0.4 + k * 0.09)
+        c.drawString(wd, x, y + (1 - g) * 22, f, P(WH, a * g))
+        x += f.measureText(wd) + sp
+
+def sub(c, s, x, y, a, sz=32):
+    tx(c, s, x, y, 'b', sz, MU, a)
+
+# 5. Pre-rendered Background with Soft Radial Glow & Tech Grid
+def mkbg():
+    s = skia.Surface(W, H)
+    c = s.getCanvas()
+    c.clear(skia.Color(12, 14, 19))
+    gp = P('#181D26', 0.8, 1)
+    grid_sz = 60 if IS_LAND else 48
+    for x in range(0, W + 1, grid_sz): c.drawLine(x, 0, x, H, gp)
+    for y in range(0, H + 1, grid_sz): c.drawLine(0, y, W, y, gp)
     
-    if align == "c":
-        x = x - w / 2.0
-    elif align == "r":
-        x = x - w
-        
-    c = color
-    if isinstance(color, str):
-        c = hex_to_rgb(color)
-    if alpha < 0.999:
-        c = (c[0], c[1], c[2], int(clamp(alpha) * 255))
-        
-    draw.text((x, y), s, font=font, fill=c)
-    return w, h
-
-def draw_algenza_logo_mark(draw, cx, cy, size=100, alpha=1.0, glow=False):
-    """Draws the authentic ALGENZA dual-polygon geometric chevron mark"""
-    s = size / 100.0
-    a = int(clamp(alpha) * 255)
+    # Subtle emerald ambient halo
+    p = skia.Paint(AntiAlias=True)
+    center_pt = skia.Point(W * 0.6 if IS_LAND else W * 0.5, H * 0.45)
+    rad = max(W, H) * 0.55
+    p.setShader(skia.GradientShader.MakeRadial(center_pt, rad, [skia.Color(63, 203, 144, 38), skia.Color(63, 203, 144, 0)]))
+    c.drawRect(skia.Rect.MakeWH(W, H), p)
     
-    # Polygon 1 (Teal)
-    pts1 = [
-        (cx + (30.77 - 50.0) * s, cy + (45.55 - 50.0) * s),
-        (cx + (43.12 - 50.0) * s, cy + (69.50 - 50.0) * s),
-        (cx + (26.34 - 50.0) * s, cy + (100.0 - 50.0) * s),
-        (cx + (0.000 - 50.0) * s, cy + (100.0 - 50.0) * s)
-    ]
-    
-    # Polygon 2 (Rose)
-    pts2 = [
-        (cx + (49.42 - 50.0) * s, cy + (0.000 - 50.0) * s),
-        (cx + (100.0 - 50.0) * s, cy + (100.0 - 50.0) * s),
-        (cx + (71.79 - 50.0) * s, cy + (100.0 - 50.0) * s),
-        (cx + (36.13 - 50.0) * s, cy + (26.50 - 50.0) * s)
-    ]
-    
-    draw.polygon(pts1, fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], a))
-    draw.polygon(pts2, fill=(ROSE_RGB[0], ROSE_RGB[1], ROSE_RGB[2], a))
+    # Subtle vignette
+    p2 = skia.Paint(AntiAlias=True)
+    p2.setShader(skia.GradientShader.MakeRadial(skia.Point(W / 2, H / 2), max(W, H) * 0.7, [skia.Color(0, 0, 0, 0), skia.Color(0, 0, 0, 160)]))
+    c.drawRect(skia.Rect.MakeWH(W, H), p2)
+    return s.makeImageSnapshot()
 
-def draw_card_panel(draw, bbox, alpha=1.0, border_color=BORDER_RGB, border_width=2):
-    a = clamp(alpha)
-    fill_c = (PANEL_RGB[0], PANEL_RGB[1], PANEL_RGB[2], int(235 * a))
-    border_c = (border_color[0], border_color[1], border_color[2], int(255 * a))
-    draw_round_rect(draw, bbox, radius=18, fill=fill_c, outline=border_c, width=border_width)
+BG = mkbg()
 
-# 5. Background Generation (Precomputed Static Layer with Rich Glow Grid)
-def make_background():
-    img = Image.new("RGBA", (W, H), hex_to_rgba(COLORS["bg"]))
-    d = ImageDraw.Draw(img)
-    
-    # Grid lines with subtle depth gradient (brighter near center)
-    grid_gap = 64
-    cx_g, cy_g = W / 2.0, H / 2.0
-    max_dist = math.sqrt(cx_g**2 + cy_g**2)
-    for x in range(0, W + 1, grid_gap):
-        dist = abs(x - cx_g) / cx_g
-        alpha = int(50 + 60 * (1.0 - dist))
-        d.line([(x, 0), (x, H)], fill=(20, 38, 62, alpha), width=1)
-    for y in range(0, H + 1, grid_gap):
-        dist = abs(y - cy_g) / cy_g
-        alpha = int(50 + 60 * (1.0 - dist))
-        d.line([(0, y), (W, y)], fill=(20, 38, 62, alpha), width=1)
-        
-    # Stronger radial teal & rose ambient lighting for depth
-    # Top-right teal glow
-    glow_teal = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d_gt = ImageDraw.Draw(glow_teal)
-    center_tr = (int(W * 0.72), int(H * 0.30))
-    d_gt.ellipse([center_tr[0] - 600, center_tr[1] - 600, center_tr[0] + 600, center_tr[1] + 600],
-                 fill=(112, 224, 214, 55))
-    glow_teal = glow_teal.filter(ImageFilter.GaussianBlur(160))
-    
-    # Bottom-left rose glow
-    glow_rose = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d_gr = ImageDraw.Draw(glow_rose)
-    center_bl = (int(W * 0.28), int(H * 0.72))
-    d_gr.ellipse([center_bl[0] - 550, center_bl[1] - 550, center_bl[0] + 550, center_bl[1] + 550],
-                 fill=(244, 144, 151, 40))
-    glow_rose = glow_rose.filter(ImageFilter.GaussianBlur(150))
-    
-    # Center gold accent glow
-    glow_gold = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d_gg = ImageDraw.Draw(glow_gold)
-    center_gc = (int(W * 0.5), int(H * 0.5))
-    d_gg.ellipse([center_gc[0] - 400, center_gc[1] - 400, center_gc[0] + 400, center_gc[1] + 400],
-                 fill=(255, 215, 0, 18))
-    glow_gold = glow_gold.filter(ImageFilter.GaussianBlur(180))
-    
-    img = Image.alpha_composite(img, glow_teal)
-    img = Image.alpha_composite(img, glow_rose)
-    img = Image.alpha_composite(img, glow_gold)
-    return img
-
-BACKGROUND_LAYER = make_background()
-
-# 6. Candlestick & Market Data Generation
-rng = np.random.default_rng(101)
-CANDLES = []
-p = 2680.0  # Gold spot price simulation
-for k in range(16):
-    o = p
-    c = p + float(rng.normal(1.8, 2.4))
-    h = max(o, c) + abs(float(rng.normal(0, 1.2)))
-    l = min(o, c) - abs(float(rng.normal(0, 1.2)))
-    CANDLES.append((o, h, l, c))
-    p = c
-
-PRICE_MIN = min(x[2] for x in CANDLES) - 2.0
-PRICE_MAX = max(x[1] for x in CANDLES) + 2.0
-
-def price_to_y(val, top=280, bottom=780):
-    return bottom - (val - PRICE_MIN) / (PRICE_MAX - PRICE_MIN) * (bottom - top)
-
-# 7. Ambient Floating Quant Particles (Enhanced Visibility & Variety)
-_pr = np.random.default_rng(77)
-PARTICLES = list(zip(
-    _pr.uniform(0, W, 85),
-    _pr.uniform(0, H, 85),
-    _pr.uniform(10, 42, 85),      # speed
-    _pr.uniform(2, 8, 85),        # radius
-    _pr.uniform(0, 2 * math.pi, 85),
-    _pr.choice([TEAL_RGB, ROSE_RGB, BLUE_RGB, GOLD_RGB], 85),
-    _pr.uniform(0.6, 1.0, 85)     # brightness multiplier
-))
-
-def draw_particles(draw, t):
-    for x0, y0, sp, r, ph, col, bri in PARTICLES:
-        y = (y0 - t * sp) % H
-        x = (x0 + math.sin(t * 0.4 + ph) * 28.0) % W
-        # Enhanced alpha range (0.25 - 0.65) for much better visibility
-        alpha = int((0.25 + 0.40 * (0.5 + 0.5 * math.sin(t * 2.5 + ph))) * 255 * bri)
-        # Soft glow ring around larger particles
-        if r > 4.5:
-            glow_r = r * 2.2
-            glow_a = int(alpha * 0.25)
-            draw.ellipse([x - glow_r, y - glow_r, x + glow_r, y + glow_r],
-                         fill=(col[0], col[1], col[2], glow_a))
-        draw.ellipse([x - r, y - r, x + r, y + r], fill=(col[0], col[1], col[2], alpha))
-
-# 8. Load Lip-sync Data
+# Load speech lip-sync envelope
 try:
-    MOUTH = np.load("mouth.npy")
+    MO = np.load('mouth.npy')
 except Exception:
-    MOUTH = np.zeros(10)
+    MO = np.zeros(10)
 
-def get_mouth_val(t):
-    idx = int(t * FPS)
-    if idx < len(MOUTH):
-        return float(MOUTH[idx])
-    return 0.0
+# Procedural Candlestick Data
+rng = np.random.default_rng(0)
+CAND = []
+p_val = 100.0
+for k in range(16):
+    o = p_val
+    c_ = p_val + rng.normal(1.1, 1.5)
+    h_ = max(o, c_) + abs(rng.normal(0, 0.8))
+    l_ = min(o, c_) - abs(rng.normal(0, 0.8))
+    CAND.append((o, h_, l_, c_))
+    p_val = c_
+PMIN = min(x[2] for x in CAND)
+PMAX = max(x[1] for x in CAND)
 
-# 9. Animated Cyber-Quant Sentinel Character & HUD (Enhanced with breathing, dual arms, head bob)
-def draw_quant_sentinel(draw, t, mouth_val, x, y, scale=1.0, scene_idx=0):
-    """
-    Renders ALGENZA's signature institutional Quant Sentinel / AI Trader Avatar.
-    Features: breathing idle, head bob, audio-reactive visor, dual arms, holographic rings.
-    """
-    s = scale
-    m = clamp(mouth_val)
-    
-    # --- Breathing idle animation (subtle scale oscillation) ---
-    breath = 1.0 + 0.012 * math.sin(t * 1.8)
-    s_b = s * breath  # breathing-affected scale
-    
-    # --- Head bob synced to audio energy ---
-    head_bob_y = -int(3.5 * m * math.sin(t * 12.0) * s)
-    
-    # Ambient holographic rings (dual pulsing)
-    for ring_idx in range(2):
-        ring_r = int((140 + ring_idx * 30) * s)
-        pulse = 1.0 + 0.06 * math.sin(t * (3.5 + ring_idx * 1.2) + ring_idx * 1.5)
-        ring_alpha = int(max(0, min(255, (50 - ring_idx * 15))))
-        draw.ellipse([x - ring_r * pulse, y - ring_r * pulse, x + ring_r * pulse, y + ring_r * pulse],
-                     outline=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], ring_alpha), width=int((2 - ring_idx * 0.5) * s))
-    
-    # Floating holographic data particles around sentinel
-    for pk in range(6):
-        p_angle = t * 1.5 + pk * (math.pi * 2.0 / 6)
-        p_r = int((110 + 20 * math.sin(t * 2.0 + pk)) * s)
-        px = x + int(p_r * math.cos(p_angle))
-        py = y + int(p_r * 0.5 * math.sin(p_angle))
-        p_alpha = int(40 + 30 * (0.5 + 0.5 * math.sin(t * 3.0 + pk * 1.2)))
-        p_size = int(3 * s)
-        draw.ellipse([px - p_size, py - p_size, px + p_size, py + p_size],
-                     fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], p_alpha))
-    
-    # Shoulders & Institutional Jacket (with breathing scale)
-    shoulder_w = int(130 * s_b)
-    shoulder_h = int(90 * s_b)
-    draw_round_rect(draw, [x - shoulder_w, y + int(45 * s_b), x + shoulder_w, y + int(45 * s_b) + shoulder_h],
-                    radius=int(22 * s_b), fill=(PANEL_RGB[0], PANEL_RGB[1], PANEL_RGB[2], 250),
-                    outline=(BORDER_RGB[0], BORDER_RGB[1], BORDER_RGB[2], 255), width=int(3 * s))
-    
-    # Signature ALGENZA Tie / Core polygon badge
-    draw_algenza_logo_mark(draw, x, y + int(75 * s_b), size=int(34 * s_b), alpha=0.95)
-    
-    # Head & Mask (with head bob)
-    head_w = int(80 * s_b)
-    head_h = int(95 * s_b)
-    hy = y + head_bob_y
-    head_box = [x - head_w, hy - head_h, x + head_w, hy + int(40 * s_b)]
-    draw_round_rect(draw, head_box, radius=int(28 * s_b),
-                    fill=(COLORS["bg_alt"] if isinstance(COLORS["bg_alt"], tuple) else hex_to_rgb(COLORS["bg_alt"])),
-                    outline=(BORDER_RGB[0], BORDER_RGB[1], BORDER_RGB[2], 255), width=int(3 * s))
-    
-    # Cybernetic Glowing Visor with outer glow
-    visor_w = int(62 * s_b)
-    visor_h = int(22 * s_b)
-    visor_y = hy - int(25 * s_b)
-    visor_box = [x - visor_w, visor_y - visor_h, x + visor_w, visor_y + visor_h]
-    
-    # Outer visor glow
-    glow_expand = int(6 * s)
-    visor_glow_alpha = int(35 + 25 * m)
-    draw_round_rect(draw, [x - visor_w - glow_expand, visor_y - visor_h - glow_expand,
-                           x + visor_w + glow_expand, visor_y + visor_h + glow_expand],
-                    radius=int(14 * s), fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], visor_glow_alpha))
-    
-    # Visor Fill
-    draw_round_rect(draw, visor_box, radius=int(10 * s), fill=(10, 24, 38, 255),
-                    outline=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], 255), width=int(2 * s))
-    
-    # Visor holographic waveform (enhanced: more bars, smoother)
-    scan_x = x - int(50 * s_b)
-    scan_w = int(100 * s_b)
-    n_bars = 12
-    for k in range(n_bars):
-        bar_x = scan_x + k * (scan_w / (n_bars - 1.0))
-        # Complex waveform: main + harmonic
-        wave = math.sin(k * 0.7 + t * 8.0) ** 2 + 0.3 * math.sin(k * 1.4 + t * 12.0) ** 2
-        bar_h = int((4 + 20 * m * wave) * s_b)
-        bar_alpha = int(180 + 70 * m)
-        draw.line([(bar_x, visor_y - bar_h / 2), (bar_x, visor_y + bar_h / 2)],
-                  fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], bar_alpha), width=int(2.5 * s))
-                  
-    # Audio-Reactive Mouth (enhanced with glow)
-    mouth_w = int((30 - 6 * m) * s_b)
-    mouth_h = int((4 + 26 * m) * s_b)
-    mouth_y_pos = hy + int(14 * s_b)
-    # Mouth glow
-    if m > 0.1:
-        mg_expand = int(4 * s * m)
-        draw_round_rect(draw, [x - mouth_w / 2 - mg_expand, mouth_y_pos - mg_expand,
-                               x + mouth_w / 2 + mg_expand, mouth_y_pos + mouth_h + mg_expand],
-                        radius=int(max(2, min(mouth_w, mouth_h) / 2) + mg_expand),
-                        fill=(ROSE_RGB[0], ROSE_RGB[1], ROSE_RGB[2], int(60 * m)))
-    draw_round_rect(draw, [x - mouth_w / 2, mouth_y_pos, x + mouth_w / 2, mouth_y_pos + mouth_h],
-                    radius=int(max(2, min(mouth_w, mouth_h) / 2)),
-                    fill=(ROSE_RGB[0], ROSE_RGB[1], ROSE_RGB[2], int(180 + 75 * m)))
-                    
-    # --- Dual Arms with context-dependent gestures ---
-    # Right arm (primary)
-    if scene_idx in (2, 8):
-        r_arm_angle = -0.65 + 0.18 * math.sin(t * 2.8)
-    else:
-        r_arm_angle = 0.45 + 0.10 * math.sin(t * 2.0)
-    r_arm_x = x + int(70 * s_b)
-    r_arm_y = y + int(50 * s_b)
-    r_end_x = r_arm_x + int(65 * s_b * math.cos(r_arm_angle))
-    r_end_y = r_arm_y + int(65 * s_b * math.sin(r_arm_angle))
-    draw.line([(r_arm_x, r_arm_y), (r_end_x, r_end_y)],
-              fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], 240), width=int(7 * s))
-    draw.ellipse([r_end_x - int(7 * s), r_end_y - int(7 * s), r_end_x + int(7 * s), r_end_y + int(7 * s)],
-                 fill=TEXT_RGB)
-    
-    # Left arm (secondary, more subtle)
-    if scene_idx in (2, 8):
-        l_arm_angle = math.pi + 0.65 - 0.15 * math.sin(t * 2.8 + 0.5)
-    else:
-        l_arm_angle = math.pi - 0.35 - 0.06 * math.sin(t * 1.8 + 1.0)
-    l_arm_x = x - int(70 * s_b)
-    l_arm_y = y + int(50 * s_b)
-    l_end_x = l_arm_x + int(55 * s_b * math.cos(l_arm_angle))
-    l_end_y = l_arm_y + int(55 * s_b * math.sin(l_arm_angle))
-    draw.line([(l_arm_x, l_arm_y), (l_end_x, l_end_y)],
-              fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], 200), width=int(6 * s))
-    draw.ellipse([l_end_x - int(6 * s), l_end_y - int(6 * s), l_end_x + int(6 * s), l_end_y + int(6 * s)],
-                 fill=(TEXT_RGB[0], TEXT_RGB[1], TEXT_RGB[2], 200))
+def CY(v, base_y=820, height_span=430):
+    return base_y - (v - PMIN) / (PMAX - PMIN) * height_span
 
-# 10. The 9 Dedicated Scenes for ALGENZA
-def scene_0(draw, t):
-    """Scene 0: Candlestick Chart - Gold XAUUSD Breakdown"""
-    draw_text(draw, "You have a proven strategy.", 120 if not IS_VERTICAL else 60,
-              140 if not IS_VERTICAL else 180, "h", 64 if not IS_VERTICAL else 54, TEXT_RGB)
-    draw_text(draw, "It works when you execute it by hand on Gold & Forex.", 120 if not IS_VERTICAL else 60,
-              215 if not IS_VERTICAL else 245, "b", 30 if not IS_VERTICAL else 26, MUTED_RGB)
-              
-    chart_left = 120 if not IS_VERTICAL else 50
-    chart_right = 1150 if not IS_VERTICAL else W - 50
-    chart_top = 290 if not IS_VERTICAL else 340
-    chart_bottom = 880 if not IS_VERTICAL else 1150
+EQ = np.cumsum(np.random.default_rng(7).normal(0.32, 1.0, 220))
+EQ = (EQ - EQ.min()) / (EQ.max() - EQ.min())
+
+# Character Waypoints Across Scenes for All 4 Aspect Ratios
+if IS_VERT:
+    # 9:16 Vertical coordinates
+    A = [
+        (540, 1420, 1.1),   # S0: Below chart
+        (540, 1460, 1.0),   # S1: Below missed chart
+        (540, 1380, 1.1),   # S2: Below ALGENZA logo
+        (540, 1500, 0.95),  # S3: Below cards
+        (540, 1520, 0.9),   # S4: Below pipeline
+        (540, 1540, 0.9),   # S5: Below risk panel
+        (540, 1520, 0.9),   # S6: Below files
+        (540, 1460, 1.05),  # S7: Below metrics
+        (540, 1320, 1.2)    # S8: Centered below CTA
+    ]
+elif IS_SQUARE:
+    # 1:1 Square coordinates (1080x1080)
+    A = [
+        (870, 540, 0.85),   # S0: Beside chart
+        (540, 780, 0.85),   # S1: Below chart
+        (540, 700, 1.00),   # S2: Below ALGENZA logo
+        (540, 780, 0.80),   # S3: Below 3 cards
+        (540, 780, 0.75),   # S4: Below pipeline & code
+        (540, 780, 0.75),   # S5: Below risk & phone
+        (540, 780, 0.75),   # S6: Below package & checklist
+        (540, 780, 0.85),   # S7: Below metric cards
+        (540, 740, 1.05)    # S8: Centered below CTA
+    ]
+elif IS_PORT:
+    # 4:5 Portrait coordinates (1080x1350)
+    A = [
+        (870, 680, 0.90),   # S0: Beside chart
+        (540, 1050, 0.95),  # S1: Below chart
+        (540, 950, 1.05),   # S2: Below ALGENZA logo
+        (540, 1080, 0.85),  # S3: Below cards
+        (540, 1100, 0.80),  # S4: Below pipeline
+        (540, 1100, 0.80),  # S5: Below risk panel
+        (540, 1100, 0.80),  # S6: Below package
+        (540, 1040, 0.95),  # S7: Below metrics
+        (540, 940, 1.15)    # S8: Centered below CTA
+    ]
+else:
+    # 16:9 Landscape coordinates (1920x1080)
+    A = [
+        (1560, 560, 1.0),   # S0: Beside chart
+        (300, 600, 0.9),    # S1: Left of chart
+        (300, 600, 0.9),    # S2: Left of logo
+        (290, 650, 0.8),    # S3: Left of cards
+        (270, 700, 0.7),    # S4: Left of pipeline
+        (270, 700, 0.7),    # S5: Left of risk
+        (270, 700, 0.7),    # S6: Left of files
+        (300, 640, 0.85),   # S7: Left of metrics
+        (540, 560, 1.1)     # S8: Left of CTA
+    ]
+
+# 6. Algenza Mascot - Blueprint Construction (Scene 0)
+def build(c, t, x, y, s):
+    g = sm(t, 0.2, 0.5) * (1 - sm(t, 2.0, 2.5))
+    bp = sm(t, 0.3, 1.7)
+    if g > 0:
+        c.drawLine(x - 200 * s, y, x + 200 * s, y, dash(0.5 * g))
+        c.drawLine(x, y - 230 * s, x, y + 230 * s, dash(0.5 * g))
+        for yy in (-105, 105):
+            c.drawLine(x - 200 * s, y + yy * s, x + 200 * s, y + yy * s, dash(0.25 * g))
+        for ex in (-22, 22):
+            c.drawCircle(x + ex * s, y - 37 * s, 24 * s, dash(0.6 * g))
+        c.drawArc(skia.Rect.MakeLTRB(x - 160 * s, y - 160 * s, x + 160 * s, y + 160 * s), -120, 320 * bp, False, P(G, 0.35 * g, 2))
+        ang = math.radians(-120 + 320 * bp)
+        c.drawLine(x, y, x + 160 * s * math.cos(ang), y + 160 * s * math.sin(ang), P(MU, 0.5 * g, 2))
+        c.drawCircle(x, y, 5, P(WH, g))
+    pa = skia.Path()
+    pa.addRRect(skia.RRect.MakeRectXY(skia.Rect.MakeLTRB(x - 64 * s, y - 105 * s, x + 64 * s, y + 105 * s), 26 * s, 26 * s))
+    pm = skia.PathMeasure(pa, False)
+    L = pm.getLength()
+    seg = skia.Path()
+    pm.getSegment(0, L * bp, seg, True)
+    c.drawPath(seg, GL(G, 0.6 * g, 8))
+    c.drawPath(seg, P(G, 1, 4))
+    if g > 0:
+        q = g * sm(bp, 0.05, 0.3)
+        for hx, hy in ((-64, -105), (64, -105), (64, 105), (-64, 105)):
+            px, py = x + hx * s, y + hy * s
+            c.drawLine(px - 34 * s, py, px + 34 * s, py, P(G, 0.7 * q, 2))
+            rr(c, px - 6, py - 6, px + 6, py + 6, 1, P(WH, q))
+            c.drawCircle(px - 34 * s, py, 5, P(G, q))
+            c.drawCircle(px + 34 * s, py, 5, P(G, q))
+    c.drawLine(x, y - 105 * s, x, y - 105 * s - 60 * s * bp, P(G, 1, 7 * s))
+    c.drawLine(x, y + 105 * s, x, y + 105 * s + 55 * s * bp, P(G, 1, 7 * s))
+    return sm(t, 1.6, 2.1)
+
+# 7. Algenza Mascot - Body, Expressions & Motion
+def body(c, t, m, x, y, s, i):
+    wave = i in (2, NS - 1)
+    happy = i in (2, 7, NS - 1) and not any(ST[j] - 0.05 <= t <= ST[j] + D[j] + 0.1 for j in range(NS))
+    worried = i == 1
+    lk = -4 if x > W / 2 else 4
     
-    # Chart Panel
-    draw_card_panel(draw, [chart_left, chart_top, chart_right, chart_bottom], alpha=0.9)
-    draw_text(draw, "XAUUSD  \u00b7  1-MINUTE INSTITUTIONAL TICK DATA", chart_left + 30, chart_top + 25, "mb", 22, GOLD_RGB)
+    # 1. Soft radial energy aura
+    c.drawCircle(x, y, 150 * s, GL(G, 0.14, 0, 40))
     
-    # Draw Candlesticks progressively
-    num_candles = len(CANDLES)
-    candle_w = (chart_right - chart_left - 80) / num_candles
+    # 2. Cyber Signal Antenna (Wick)
+    c.drawLine(x, y - 105 * s, x, y - 165 * s, P(G, 1, 6 * s))
+    # Dual angled sensor antenna prongs
+    c.drawLine(x - 18 * s, y - 130 * s, x - 32 * s, y - 158 * s, P(LN, 1, 3 * s))
+    c.drawLine(x + 18 * s, y - 130 * s, x + 32 * s, y - 158 * s, P(LN, 1, 3 * s))
     
-    # Price Axis Labels (Y-axis)
-    n_labels = 6
-    for lbl_i in range(n_labels):
-        price_val = PRICE_MIN + (PRICE_MAX - PRICE_MIN) * lbl_i / (n_labels - 1)
-        label_y = price_to_y(price_val, chart_top + 70, chart_bottom - 50)
-        draw_text(draw, f"{price_val:.1f}", chart_left + 10, label_y - 10, "m", 16, MUTED_RGB)
-        draw.line([(chart_left + 70, label_y), (chart_right - 20, label_y)],
-                  fill=(BORDER_RGB[0], BORDER_RGB[1], BORDER_RGB[2], 60), width=1)
+    signal_pulse = 0.5 + 0.5 * math.sin(t * 8)
+    c.drawCircle(x, y - 165 * s, 15 * s, GL(CYAN, 0.45 * signal_pulse, 0, 12))
+    c.drawCircle(x, y - 165 * s, 8 * s, P(CYAN if signal_pulse > 0.4 else G))
     
-    curve_pts = []
-    for k, (o, h, l, c) in enumerate(CANDLES):
-        t_cand = cand_t(k)
-        g = smooth_step(t, t_cand, t_cand + 0.22)
-        if g <= 0:
+    # Bottom stabilizer wick & thruster fin
+    c.drawLine(x, y + 105 * s, x, y + 155 * s, P(G, 1, 6 * s))
+    c.drawLine(x - 20 * s, y + 120 * s, x - 34 * s, y + 144 * s, P(LN, 1, 3 * s))
+    c.drawLine(x + 20 * s, y + 120 * s, x + 34 * s, y + 144 * s, P(LN, 1, 3 * s))
+    c.drawCircle(x, y + 155 * s, 7 * s, GL(CYAN, 0.5, 0, 10))
+    c.drawCircle(x, y + 155 * s, 5 * s, P(WH))
+    
+    # 3. Dynamic Articulated Arms
+    # Left pointing arm
+    al = 3.35 if i == 0 else 2.25 - 0.9 * m
+    c.drawCircle(x - 62 * s, y + 25 * s, 9 * s, P('#162720'))
+    c.drawLine(x - 62 * s, y + 25 * s, x - 62 * s + 72 * s * math.cos(al), y + 25 * s + 72 * s * math.sin(al), P(G, 1, 9 * s))
+    c.drawCircle(x - 62 * s + 72 * s * math.cos(al), y + 25 * s + 72 * s * math.sin(al), 8 * s, P(WH))
+    
+    # Right waving arm
+    an = (-1.0 + 0.4 * math.sin(t * 9)) if wave else (-0.35 + 0.08 * math.sin(t * 3)) if 3 <= i <= 7 else 0.95
+    c.drawCircle(x + 62 * s, y + 25 * s, 9 * s, P('#162720'))
+    c.drawLine(x + 62 * s, y + 25 * s, x + 62 * s + 62 * s * math.cos(an), y + 25 * s + 62 * s * math.sin(an), P(G, 1, 9 * s))
+    c.drawCircle(x + 62 * s + 62 * s * math.cos(an), y + 25 * s + 62 * s * math.sin(an), 8 * s, P(WH))
+    
+    # 4. Algenza Mascot Main Body (Emerald Capsule)
+    rr(c, x - 64 * s, y - 105 * s, x + 64 * s, y + 105 * s, 26 * s, P(G))
+    
+    # Dark titanium side shoulder armor plates
+    rr(c, x - 64 * s, y - 85 * s, x - 50 * s, y + 65 * s, 8 * s, P('#10221A'))
+    rr(c, x + 50 * s, y - 85 * s, x + 64 * s, y + 65 * s, 8 * s, P('#10221A'))
+    c.drawLine(x - 50 * s, y - 75 * s, x - 50 * s, y + 55 * s, P(CYAN, 0.6, 2 * s))
+    c.drawLine(x + 50 * s, y - 75 * s, x + 50 * s, y + 55 * s, P(CYAN, 0.6, 2 * s))
+    
+    # Tech ear sensor nodes (Algenza tech styling)
+    rr(c, x - 74 * s, y - 38 * s, x - 62 * s, y + 16 * s, 6 * s, P('#0E1F18'))
+    rr(c, x + 62 * s, y - 38 * s, x + 74 * s, y + 16 * s, 6 * s, P('#0E1F18'))
+    c.drawCircle(x - 68 * s, y - 11 * s, 4 * s, P(CYAN))
+    c.drawCircle(x + 68 * s, y - 11 * s, 4 * s, P(CYAN))
+    
+    # Cyber Visor housing in upper chassis
+    rr(c, x - 46 * s, y - 62 * s, x + 46 * s, y - 12 * s, 14 * s, P('#0B1713'))
+    rr(c, x - 46 * s, y - 62 * s, x + 46 * s, y - 12 * s, 14 * s, P(LN, 0.8, 1.5 * s))
+    
+    # Gloss reflection highlight
+    rr(c, x - 42 * s, y - 92 * s, x - 30 * s, y + 20 * s, 6 * s, P('#FFFFFF', 0.22))
+    
+    # 5. Expressive Digital Eyes & Blinking
+    eh = 0.12 if (t % 3.7) < 0.13 else 1.0
+    for ex in (-22, 22):
+        cx_eye = x + ex * s
+        cy_eye = y - 37 * s
+        if happy:
+            c.drawArc(skia.Rect.MakeLTRB(cx_eye - 13 * s, cy_eye - 9 * s, cx_eye + 13 * s, cy_eye + 15 * s), 200, 140, False, P('#FFFFFF', 1, 5 * s))
             continue
+        c.drawOval(skia.Rect.MakeLTRB(cx_eye - 14 * s, cy_eye - 16 * s * eh, cx_eye + 14 * s, cy_eye + 16 * s * eh), P('#FFFFFF'))
+        if eh > 0.5:
+            c.drawCircle(cx_eye + lk * s, cy_eye + 2 * s, 6.5 * s, P(DK))
+            c.drawCircle(cx_eye + lk * s + 3 * s, cy_eye - 2 * s, 2.5 * s, P('#FFFFFF'))
+        if worried:
+            c.drawLine(cx_eye - 12 * s, cy_eye - 25 * s - (ex > 0) * 6 * s, cx_eye + 12 * s, cy_eye - 25 * s - (ex < 0) * 6 * s, P(CYAN, 1, 4 * s))
             
-        cx = chart_left + 40 + k * candle_w + candle_w / 2.0
-        col = GREEN_RGB if c >= o else RED_RGB
+    # Sweat drop when worried
+    if worried:
+        dy = (t * 40) % 30
+        c.drawCircle(x + 68 * s, y - 76 * s + dy * s, 7 * s, P('#7DD3FC', 0.9))
         
-        yh = price_to_y(h, chart_top + 70, chart_bottom - 50)
-        yl = price_to_y(l, chart_top + 70, chart_bottom - 50)
-        yo = price_to_y(o, chart_top + 70, chart_bottom - 50)
-        yc = yo + (price_to_y(c, chart_top + 70, chart_bottom - 50) - yo) * g
+    # 6. Audio-Reactive Talking Mouth / Smile
+    mh = (5 + 32 * m) * s
+    mw = (34 - 8 * m) * s
+    r = min(mw, mh) / 2
+    if happy:
+        c.drawArc(skia.Rect.MakeLTRB(x - 18 * s, y + 2 * s, x + 18 * s, y + 30 * s), 20, 140, False, P(DK, 1, 5 * s))
+    else:
+        rr(c, x - mw / 2, y + 14 * s, x + mw / 2, y + 14 * s + mh, r, P(DK))
         
-        # Candle glow effect for latest candle
-        if k == len(CANDLES) - 1 and g > 0.5:
-            glow_alpha = int(30 * g)
-            bw_glow = max(6, candle_w * 0.9)
-            draw_round_rect(draw, [cx - bw_glow / 2, min(yo, yc) - 4, cx + bw_glow / 2, max(yo, yc) + 4],
-                            radius=5, fill=(col[0], col[1], col[2], glow_alpha))
-        
-        # Wick
-        draw.line([(cx, yh), (cx, yl)], fill=col, width=2)
-        # Body
-        body_top = min(yo, yc)
-        body_bot = max(yo, yc)
-        if body_bot - body_top < 2:
-            body_bot = body_top + 2
-        bw = max(4, candle_w * 0.6)
-        draw_round_rect(draw, [cx - bw / 2, body_top, cx + bw / 2, body_bot], radius=3, fill=col)
-        
-        curve_pts.append((cx, yc))
-        
-    # Moving Average Curve with gradient alpha
-    if len(curve_pts) > 1:
-        for j in range(len(curve_pts) - 1):
-            seg_alpha = int(120 + 60 * (j / len(curve_pts)))
-            draw.line([curve_pts[j], curve_pts[j + 1]],
-                      fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], seg_alpha), width=3)
-    
-    # Live price indicator (blinking dot at last candle)
-    if len(curve_pts) > 0:
-        last_pt = curve_pts[-1]
-        blink = 0.5 + 0.5 * math.sin(t * 8.0)
-        dot_alpha = int(160 + 95 * blink)
-        draw.ellipse([last_pt[0] - 6, last_pt[1] - 6, last_pt[0] + 6, last_pt[1] + 6],
-                     fill=(GREEN_RGB[0], GREEN_RGB[1], GREEN_RGB[2], dot_alpha))
-        draw_text(draw, f"${CANDLES[-1][3]:.2f}", last_pt[0] + 14, last_pt[1] - 10, "mb", 18, GREEN_RGB)
+    # 7. Algenza Chest Chevron Insignia
+    ap = skia.Path()
+    ap.moveTo(x - 14 * s, y + 78 * s)
+    ap.lineTo(x, y + 56 * s)
+    ap.lineTo(x + 14 * s, y + 78 * s)
+    c.drawPath(ap, GL(CYAN, 0.4, 6 * s))
+    c.drawPath(ap, P('#FFFFFF', 0.9, 4 * s))
+    c.drawCircle(x, y + 68 * s, 4 * s, P(CYAN))
 
-def scene_1(draw, t):
-    """Scene 1: The Dilemma - 24/7 Market Exhaustion & Missed Entries"""
+def char(c, t, m):
+    if t < 0.25: return
+    i = max(k for k in range(NS) if t >= SS[k])
+    if i == 0:
+        x, y, s = A[0]
+    else:
+        g = sm(t, SS[i], SS[i] + 0.7)
+        a, b = A[i - 1], A[i]
+        x, y, s = [a[j] + (b[j] - a[j]) * g for j in range(3)]
+        
+    # Gentle idle breathing bob
+    y += math.sin(t * 2.4) * 6 * s * sm(t, 2.3, 2.8)
+    
+    if i == 0 and t < 2.5:
+        f = build(c, t, x, y, s)
+        if f <= 0.01: return
+        c.saveLayerAlpha(None, int(f * 255))
+        body(c, t, m, x, y, s, i)
+        c.restore()
+        return
+    body(c, t, m, x, y, s, i)
+
+# 8. Individual Scene Renders
+def s0(c, t):
+    if IS_LAND:
+        base_x, base_y, span_y, cand_step = 180, 820, 430, 64
+        tx_x, tx_y = 140, 200
+        head_sz, sub_sz = 70, 32
+    elif IS_VERT:
+        base_x, base_y, span_y, cand_step = 80, 980, 360, 58
+        tx_x, tx_y = 70, 260
+        head_sz, sub_sz = 56, 26
+    elif IS_SQUARE:
+        base_x, base_y, span_y, cand_step = 65, 660, 280, 45
+        tx_x, tx_y = 60, 170
+        head_sz, sub_sz = 52, 24
+    else:  # IS_PORT (4:5)
+        base_x, base_y, span_y, cand_step = 70, 780, 320, 46
+        tx_x, tx_y = 70, 220
+        head_sz, sub_sz = 54, 26
+    
+    for k, (o, h, l, cc) in enumerate(CAND):
+        g = sm(t, cand_t(k), cand_t(k) + 0.25)
+        if g <= 0: continue
+        x = base_x + k * cand_step
+        col = G if cc >= o else RD
+        c.drawLine(x, CY(h, base_y, span_y), x, CY(l, base_y, span_y), P(col, g, 3))
+        yo = CY(o, base_y, span_y)
+        yc = yo + (CY(cc, base_y, span_y) - yo) * g
+        rr(c, x - 13, min(yo, yc), x + 13, max(yo, yc) + 2, 4, P(col))
+        
+    g = sm(t, 2.4, 3.2)
+    n = int(16 * g)
+    if n > 1:
+        pa = skia.Path()
+        pa.moveTo(base_x, CY(CAND[0][3], base_y, span_y))
+        for k in range(1, n):
+            pa.lineTo(base_x + k * cand_step, CY(CAND[k][3], base_y, span_y))
+        c.drawPath(pa, GL('#A7F3C9', 0.5, 8))
+        c.drawPath(pa, P('#A7F3C9', 0.8, 3))
+        
+    head(c, "You have a strategy.", tx_x, tx_y, 1, head_sz)
+    sub(c, "It works when you trade it by hand.", tx_x, tx_y + (58 if IS_LAND else 46), sm(t, 2.6, 3.1), sub_sz)
+
+def pf(w):
+    return 600 - (80 * math.sin(w * .006) + 45 * math.sin(w * .017 + 1) + 18 * math.sin(w * .05))
+
+def s1(c, t):
     u = t - SS[1]
-    draw_text(draw, "Markets never sleep.", 120 if not IS_VERTICAL else 60,
-              140 if not IS_VERTICAL else 180, "h", 64 if not IS_VERTICAL else 54, TEXT_RGB)
-    draw_text(draw, "You miss entries. Emotions take over. Drawdown hits.", 120 if not IS_VERTICAL else 60,
-              215 if not IS_VERTICAL else 245, "b", 30 if not IS_VERTICAL else 26, MUTED_RGB)
-              
-    box_l = 120 if not IS_VERTICAL else 50
-    box_r = 1250 if not IS_VERTICAL else W - 50
-    box_t = 290 if not IS_VERTICAL else 340
-    box_b = 880 if not IS_VERTICAL else 1150
-    draw_card_panel(draw, [box_l, box_t, box_r, box_b], alpha=0.92)
+    if IS_LAND:
+        tx_x, tx_y = 520, 190
+        head_sz, sub_sz = 64, 32
+        pan_l, pan_t, pan_r, pan_b = 520, 300, 1800, 900
+        wave_y_offset = 0
+    elif IS_VERT:
+        tx_x, tx_y = 70, 260
+        head_sz, sub_sz = 54, 26
+        pan_l, pan_t, pan_r, pan_b = 70, 360, 1010, 960
+        wave_y_offset = 80
+    elif IS_SQUARE:
+        tx_x, tx_y = 60, 170
+        head_sz, sub_sz = 52, 24
+        pan_l, pan_t, pan_r, pan_b = 60, 270, 1020, 650
+        wave_y_offset = 140
+    else:  # 4:5
+        tx_x, tx_y = 70, 220
+        head_sz, sub_sz = 54, 26
+        pan_l, pan_t, pan_r, pan_b = 70, 340, 1010, 830
+        wave_y_offset = 60
     
-    # Oscillating high-frequency price sine wave
-    sc = u * 240.0
-    pts = []
-    for sx in range(int(box_l + 20), int(box_r - 20), 8):
-        wx = sx + sc
-        sy = (box_t + box_b) / 2.0 - (70 * math.sin(wx * 0.012) + 40 * math.sin(wx * 0.028) + 15 * math.sin(wx * 0.07))
-        pts.append((sx, sy))
-        
-    for j in range(len(pts) - 1):
-        draw.line([pts[j], pts[j + 1]], fill=TEAL_RGB, width=3)
-        
-    # Trigger Missed and Late Entry indicators
-    for k in range(int(sc / 350) - 1, int((sc + 1200) / 350) + 2):
-        wx = k * 350 + 175
+    head(c, "Markets never sleep.", tx_x, tx_y, 1, head_sz)
+    sub(c, "You miss entries. Emotions take over.", tx_x, tx_y + (55 if IS_LAND else 44), 1, sub_sz)
+    panel(c, pan_l, pan_t, pan_r, pan_b)
+    
+    sc = u * 260
+    pa = skia.Path()
+    step_x = 6
+    x_range = range(pan_l + 20, pan_r - 19, step_x)
+    for j, sx in enumerate(x_range):
+        (pa.moveTo if j == 0 else pa.lineTo)(sx, pf(sx + sc) - wave_y_offset)
+    c.drawPath(pa, GL(G, 0.5, 10))
+    c.drawPath(pa, P(G, 1, 3))
+    
+    for k in range(int(sc / 380) - 1, int((sc + 1300) / 380) + 2):
+        wx = k * 380 + 190
         sx = wx - sc
-        if not (box_l + 60 < sx < box_r - 60):
-            continue
-        sy = (box_t + box_b) / 2.0 - (70 * math.sin(wx * 0.012) + 40 * math.sin(wx * 0.028) + 15 * math.sin(wx * 0.07))
-        
-        if sx < (box_l + box_r) / 2.0 + 80:
-            draw.ellipse([sx - 8, sy - 8, sx + 8, sy + 8], fill=RED_RGB)
-            draw_card_panel(draw, [sx - 65, sy - 64, sx + 65, sy - 24], alpha=0.95, border_color=RED_RGB)
-            draw_text(draw, "MISSED ENTRY", sx, sy - 52, "bb", 16, RED_RGB, align="c")
+        if not (pan_l + 50 < sx < pan_r - 40): continue
+        py = pf(wx) - wave_y_offset
+        if sx < (pan_l + pan_r) * 0.55:
+            c.drawCircle(sx, py, 9, P(RD))
+            rr(c, sx - 62, py - 66, sx + 62, py - 24, 10, P(RD, 0.9))
+            tx(c, "MISSED", sx, py - 36, 'bb', 22, '#FFFFFF', 1, 'c')
         else:
-            draw.ellipse([sx - 8, sy - 8, sx + 8, sy + 8], fill=GREEN_RGB)
-            draw_text(draw, "LATE CHASE", sx, sy - 30, "bb", 16, MUTED_RGB, align="c")
+            c.drawCircle(sx, py, 9, P(G))
+            tx(c, "ENTRY", sx, py - 30, 'bb', 20, G, 1, 'c')
             
-    # 24/7 Clock indicator
-    cx_clk = box_r - 80
-    cy_clk = box_t + 80
-    draw.ellipse([cx_clk - 35, cy_clk - 35, cx_clk + 35, cy_clk + 35], outline=MUTED_RGB, width=3)
-    hr_angle = u * 4.0
-    draw.line([(cx_clk, cy_clk), (cx_clk + 22 * math.cos(hr_angle), cy_clk + 22 * math.sin(hr_angle))], fill=TEXT_RGB, width=3)
-    draw_text(draw, "24/7 LIQUIDITY", cx_clk, cy_clk + 45, "mb", 16, MUTED_RGB, align="c")
+    # Analog clock
+    cx = pan_r - 65
+    cy = pan_t - (100 if IS_LAND else 60)
+    c.drawCircle(cx, cy, 36, P(WH, 0.8, 4))
+    for ang, ln in ((u * 7, 26), (u * 0.6, 17)):
+        c.drawLine(cx, cy, cx + ln * math.sin(ang), cy - ln * math.cos(ang), P(WH, 0.9, 4))
 
-def scene_2(draw, t):
-    """Scene 2: ALGENZA Brand Reveal - Electric Shockwave & Logo Assembly"""
+def s2(c, t):
     u = t - SS[2]
-    cx = W / 2.0
-    cy = (H / 2.0) - (0 if not IS_VERTICAL else 140)
+    if IS_LAND:
+        cx, cy, font_sz, sub_sz = 1160, 500, 170, 36
+    elif IS_VERT:
+        cx, cy, font_sz, sub_sz = 540, 620, 128, 28
+    elif IS_SQUARE:
+        cx, cy, font_sz, sub_sz = 540, 410, 120, 26
+    else:  # 4:5
+        cx, cy, font_sz, sub_sz = 540, 520, 128, 28
+        
+    f = F('lg', font_sz)
+    wT = f.measureText("AL")
+    wN = f.measureText("GENZA")
+    w = wT + wN
+    x0 = cx - w / 2
+    gT = sm(u, 0.15, 0.75)
+    gN = sm(u, 0.4, 0.95)
     
-    g_mark = smooth_step(u, 0.15, 0.8)
-    g_text = smooth_step(u, 0.45, 1.0)
+    c.drawOval(skia.Rect.MakeLTRB(cx - w * 0.6, cy - 190, cx + w * 0.6, cy + 60), GL(G, 0.14 * gT, 0, 70))
+    gp = GL(G, 0.55 * gT, 0, 20)
+    c.drawString("AL", x0 - (1 - gT) * 90, cy, f, gp)
+    c.drawString("AL", x0 - (1 - gT) * 90, cy, f, P(G, gT))
+    c.drawString("GENZA", x0 + wT + (1 - gN) * 90, cy, f, P(WH, gN))
     
-    # Expanding shockwave rings
-    if 0 < u < 1.8:
-        for ring_idx in (1, 2):
-            rad = int((u * 420.0 + ring_idx * 90) % 750)
-            a_ring = int(max(0, 1.0 - rad / 750.0) * 120)
-            draw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad],
-                         outline=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], a_ring), width=3)
-                         
-    # Main ALGENZA Logo Mark
-    mark_size = int(140 * bounce_out(g_mark))
-    draw_algenza_logo_mark(draw, cx, cy - 60, size=mark_size, alpha=g_mark)
-    
-    # Title Text "ALGENZA"
-    draw_text(draw, BRAND_NAME, cx - 40, cy + 50, "h", 86, TEXT_RGB, alpha=g_text, align="c")
-    
-    # "PRO" Badge
-    badge_w = 75
-    badge_h = 36
-    draw_round_rect(draw, [cx + 140, cy + 42, cx + 140 + badge_w, cy + 42 + badge_h],
-                    radius=8, fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], int(40 * g_text)),
-                    outline=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], int(255 * g_text)), width=2)
-    draw_text(draw, BRAND_TAG, cx + 140 + badge_w / 2, cy + 48, "mb", 22, TEAL_RGB, alpha=g_text, align="c")
-    
-    # Slogan / Tagline
-    draw_text(draw, BRAND_SLOGAN, cx, cy + 130, "b", 32, MUTED_RGB, alpha=smooth_step(u, 0.8, 1.4), align="c")
-    draw_text(draw, "algenza.com  \u00b7  Lead Architect Muhammad Hassan", cx, cy + 180, "mb", 24, GOLD_RGB, alpha=smooth_step(u, 1.1, 1.7), align="c")
+    g = sm(u, 0.8, 1.5)
+    if g > 0:
+        c.drawLine(x0, cy + 50, x0 + w * g, cy + 50, GL(G, 0.6, 10))
+        c.drawLine(x0, cy + 50, x0 + w * g, cy + 50, P(G, 1, 4))
+        c.drawCircle(x0 + w * g, cy + 50, 7, P(WH, 1 - sm(u, 1.4, 1.7)))
+    tx(c, "Trading strategies  \u2192  automated systems", cx, cy + (125 if IS_LAND else 105), 'b', sub_sz, MU, sm(u, 1.4, 1.9), 'c')
 
-def scene_3(draw, t):
-    """Scene 3: Flagship Products Showcase - Apex Scalper, Titan Grid, Prop Risk Guard"""
-    draw_text(draw, "Engineered For Peak Performance.", 100 if not IS_VERTICAL else 50,
-              120 if not IS_VERTICAL else 160, "h", 58 if not IS_VERTICAL else 48, TEXT_RGB)
-    draw_text(draw, "Proprietary Expert Advisors built for MT5, FIX API & Prop Firms.", 100 if not IS_VERTICAL else 50,
-              190 if not IS_VERTICAL else 225, "b", 28 if not IS_VERTICAL else 24, MUTED_RGB)
-              
-    num_cards = len(PRODUCTS)
-    if not IS_VERTICAL:
-        card_w = (W - 200 - (num_cards - 1) * 24) / num_cards
-        card_h = 560
-        y0 = 270
-        for k, prod in enumerate(PRODUCTS):
-            g = smooth_step(t, card_t(k), card_t(k) + 0.45)
-            if g <= 0:
-                continue
-            x = 100 + k * (card_w + 24)
-            y = y0 + (1.0 - g) * 50.0
+CARDS = [("MT4 / MT5", "Expert Advisors"), ("IBKR API", "Interactive Brokers"), ("Crypto Bots", "Exchange APIs")]
+def s3(c, t):
+    tx_x = 540 if IS_LAND else 70 if not IS_SQUARE else 60
+    tx_y = 215 if IS_LAND else 260 if not IS_SQUARE else 170
+    head(c, "Built for your platform.", tx_x, tx_y, 1, 64 if IS_LAND else 52)
+    
+    for k, (ti, su) in enumerate(CARDS):
+        g = sm(t, card_t(k), card_t(k) + 0.5)
+        if g <= 0: continue
+        
+        if IS_LAND:
+            x = 540 + k * 420
+            y = 310 + (1 - g) * 60
+            card_w, card_h = 380, 400
+        elif IS_SQUARE:
+            x = 65 + k * 330
+            y = 270 + (1 - g) * 40
+            card_w, card_h = 290, 360
+        elif IS_PORT:
+            x = 70
+            y = 330 + k * 220 + (1 - g) * 40
+            card_w, card_h = 940, 190
+        else:  # 9:16
+            x = 70
+            y = 360 + k * 230 + (1 - g) * 40
+            card_w, card_h = 940, 200
             
-            draw_card_panel(draw, [x, y, x + card_w, y + card_h], alpha=g, border_color=hex_to_rgb(prod["color"]))
-            # Top color accent strip
-            draw_round_rect(draw, [x, y, x + card_w, y + 8], radius=4, fill=hex_to_rgb(prod["color"]))
+        panel(c, x, y, x + card_w, y + card_h, g)
+        rr(c, x, y, x + card_w, y + 6, 3, P(G, g))
+        
+        if IS_LAND or IS_SQUARE:
+            ix = x + card_w / 2
+            iy = y + 140 if IS_LAND else y + 120
+        else:
+            ix = x + 100
+            iy = y + 100
+        
+        if k == 0:
+            for dx, h, col in ((-44, 60, G), (0, 40, RD), (44, 80, G)):
+                c.drawLine(ix + dx, iy - h / 2 - 14, ix + dx, iy + h / 2 + 14, P(col, g, 3))
+                rr(c, ix + dx - 12, iy - h / 2, ix + dx + 12, iy + h / 2, 4, P(col, g))
+        elif k == 1:
+            tx(c, "</>", ix, iy + 22, 'mb', 74 if IS_LAND else 56, G, g, 'c')
+        else:
+            for dx in (-36, 0, 36):
+                c.drawCircle(ix + dx, iy, 32, P(PN, g))
+                c.drawCircle(ix + dx, iy, 32, P(G, g, 4))
+            tx(c, "$", ix + 36, iy + 12, 'bb', 34, G, g, 'c')
             
-            # Badge
-            draw_text(draw, prod["badge"].upper(), x + 24, y + 35, "mb", 18, hex_to_rgb(prod["color"]), alpha=g)
-            # Title
-            draw_text(draw, prod["name"], x + 24, y + 75, "h", 28, TEXT_RGB, alpha=g)
-            # Tagline
-            draw_text(draw, prod["tagline"], x + 24, y + 120, "mb", 18, GOLD_RGB if "Gold" in prod["tagline"] else TEAL_RGB, alpha=g)
+        if IS_LAND or IS_SQUARE:
+            tx(c, ti, ix, y + (280 if IS_LAND else 240), 'h', 36 if IS_LAND else 28, WH, g, 'c')
+            tx(c, su, ix, y + (330 if IS_LAND else 285), 'b', 22 if IS_LAND else 18, MU, g, 'c')
+        else:
+            tx(c, ti, x + 240, y + 80, 'h', 40, WH, g, 'l')
+            tx(c, su, x + 240, y + 130, 'b', 24, MU, g, 'l')
+
+KW = {'def', 'if', 'and'}
+def colmap(l):
+    cols = [WH] * len(l)
+    for mm in re.finditer(r"[A-Za-z_][A-Za-z_0-9]*|\d+(\.\d+)?", l):
+        w = mm.group(0)
+        col = None
+        if w in KW: col = G
+        elif w[0].isdigit(): col = '#FBBF24'
+        elif mm.end() < len(l) and l[mm.end()] == '(': col = '#7DD3FC'
+        if col: cols[mm.start():mm.end()] = [col] * (mm.end() - mm.start())
+    return cols
+
+NL = ["RULES", "CODE", "BACKTEST", "BROKER API", "LIVE"]
+CODE = ["def on_bar(bar):", "    if rsi(bar, 14) < 30 and bar.close > ema(bar, 200):", "        size = risk.position_size(pct=1.0)", "        broker.buy(bar.symbol, size, sl=stop, tp=target)"]
+CMAP = [colmap(l) for l in CODE]
+LOG = [("09:31:02", "BUY", "XAUUSD", "1.50", "FILLED"), ("10:47:15", "SELL", "XAUUSD", "1.50", "FILLED"), ("11:02:40", "BUY", "EURUSD", "2.00", "FILLED")]
+
+def s4(c, t):
+    tx_x = 520 if IS_LAND else 70 if not IS_SQUARE else 60
+    tx_y = 200 if IS_LAND else 260 if not IS_SQUARE else 170
+    head(c, "From rules to live execution.", tx_x, tx_y, 1, 64 if IS_LAND else 50)
+    
+    if IS_LAND:
+        pan_l, pan_r, pan_t, pan_b = 520, 1800, 450, 920
+        NY = 320
+        NX = [620 + k * 280 for k in range(5)]
+    elif IS_SQUARE:
+        pan_l, pan_r, pan_t, pan_b = 60, 1020, 350, 660
+        NY = 265
+        NX = [140 + k * 200 for k in range(5)]
+    elif IS_PORT:
+        pan_l, pan_r, pan_t, pan_b = 70, 1010, 460, 960
+        NY = 340
+        NX = [140 + k * 200 for k in range(5)]
+    else:  # 9:16
+        pan_l, pan_r, pan_t, pan_b = 70, 1010, 480, 1020
+        NY = 360
+        NX = [170 + k * 180 for k in range(5)]
+    
+    for k in range(4):
+        c.drawLine(NX[k] + 32, NY, NX[k + 1] - 32, NY, P(LN, 1, 4))
+        g = sm(t, node_t(k) + 0.2, node_t(k + 1))
+        if g > 0:
+            c.drawLine(NX[k] + 32, NY, NX[k] + 32 + (NX[k + 1] - NX[k] - 64) * g, NY, GL(G, 0.6, 8))
+            c.drawLine(NX[k] + 32, NY, NX[k] + 32 + (NX[k + 1] - NX[k] - 64) * g, NY, P(G, 1, 4))
             
-            # Decorative Mini Diagram
-            diag_y = y + 175
-            if k == 0:  # Apex Scalper (Candles + Volatility)
-                for c_idx in range(5):
-                    cx_bar = x + 40 + c_idx * 50
-                    draw.line([(cx_bar, diag_y + 10), (cx_bar, diag_y + 110)], fill=GREEN_RGB, width=2)
-                    draw_round_rect(draw, [cx_bar - 12, diag_y + 30 + c_idx * 8, cx_bar + 12, diag_y + 80], radius=3, fill=GREEN_RGB)
-                draw_text(draw, "+45.2 Pips (0.24ms)", x + card_w / 2, diag_y + 140, "mb", 20, GREEN_RGB, alpha=g, align="c")
-            elif k == 1:  # Titan Grid (Multi-level grid lines)
-                for gl in range(4):
-                    draw.line([(x + 30, diag_y + 20 + gl * 28), (x + card_w - 30, diag_y + 20 + gl * 28)],
-                              fill=TEAL_RGB, width=2)
-                draw_text(draw, "Trailing Take-Profit", x + card_w / 2, diag_y + 140, "mb", 20, TEAL_RGB, alpha=g, align="c")
-            elif k == 2:  # Prop Risk Guard (Shield icon & FTMO safe)
-                cx_sh = x + card_w / 2
-                cy_sh = diag_y + 60
-                draw.ellipse([cx_sh - 45, cy_sh - 45, cx_sh + 45, cy_sh + 45], outline=GREEN_RGB, width=3)
-                draw_text(draw, "100%", cx_sh, cy_sh - 12, "h", 26, GREEN_RGB, alpha=g, align="c")
-                draw_text(draw, "FTMO / Prop Safe", cx_sh, diag_y + 140, "mb", 20, GREEN_RGB, alpha=g, align="c")
-            else:  # FIX Bridge (Sub-ms sockets)
-                draw_text(draw, "</> FIX API", x + card_w / 2, diag_y + 50, "h", 34, BLUE_RGB, alpha=g, align="c")
-                draw_text(draw, "0.2ms Tick Latency", x + card_w / 2, diag_y + 140, "mb", 20, BLUE_RGB, alpha=g, align="c")
-                
-            # Description text
-            words = prod["desc"].split()
-            line_str = ""
-            dy_desc = 0
-            for w in words:
-                if len(line_str) + len(w) > 28:
-                    draw_text(draw, line_str, x + 24, y + 360 + dy_desc, "b", 19, MUTED_RGB, alpha=g)
-                    line_str = w
-                    dy_desc += 26
-                else:
-                    line_str += (" " if line_str else "") + w
-            if line_str:
-                draw_text(draw, line_str, x + 24, y + 360 + dy_desc, "b", 19, MUTED_RGB, alpha=g)
+    st = -1
+    for k in range(5):
+        c.drawCircle(NX[k], NY, 30, P(PN))
+        c.drawCircle(NX[k], NY, 30, P(LN, 1, 3))
+        a = cl((t - node_t(k)) / 0.35)
+        if a > 0:
+            st = k
+            c.drawCircle(NX[k], NY, 40 * bo(a), GL(G, 0.45, 0, 14))
+            c.drawCircle(NX[k], NY, 30 * bo(a), P(G))
+        tx(c, str(k + 1), NX[k], NY + 10, 'bb', 26, DK if a > 0.5 else MU, 1, 'c')
+        tx(c, NL[k], NX[k], NY + 70, 'bb', 20 if IS_LAND else 15, WH if a > 0.5 else MU, 1, 'c')
+        
+    panel(c, pan_l, pan_t, pan_r, pan_b)
+    if st < 0: return
+    
+    u = t - node_t(st)
+    a = sm(u, 0, 0.3)
+    X = pan_l + 45
+    Y = pan_t + (70 if IS_LAND else 55)
+    
+    if st == 0:
+        for j, (kw, rest) in enumerate((("IF  ", "RSI(14) < 30  AND  close > EMA(200)"), ("THEN", "BUY  \u00b7  risk 1% of account"), ("EXIT", "at 2R  or  trailing stop"))):
+            b = a * sm(u, j * 0.25, j * 0.25 + 0.3)
+            tx(c, kw, X, Y + 50 + j * 75, 'mb', 34 if IS_LAND else 24, G, b)
+            tx(c, rest, X + (130 if IS_LAND else 85), Y + 50 + j * 75, 'm', 34 if IS_LAND else 24, WH, b)
+    elif st == 1:
+        n = int(u * 60)
+        for j, l in enumerate(CODE):
+            s = l[:max(0, n)]
+            n -= len(l)
+            tx(c, str(j + 1), X, Y + 35 + j * 54, 'm', 26 if IS_LAND else 20, MU, a)
+            cw = F('m', 26 if IS_LAND else 20).measureText('M')
+            q = 0
+            while q < len(s):
+                e = q
+                while e < len(s) and CMAP[j][e] == CMAP[j][q]: e += 1
+                tx(c, s[q:e], X + 45 + q * cw, Y + 35 + j * 54, 'm', 26 if IS_LAND else 20, CMAP[j][q], a)
+                q = e
+    elif st == 2:
+        tx(c, "Backtest \u00b7 equity curve", X, Y + 5, 'bb', 22, MU, a)
+        L_eq, R_eq, T_eq, B_eq = X + 20, pan_r - 50, Y + 35, pan_b - 35
+        c.drawLine(L_eq, B_eq, R_eq, B_eq, P(LN, a, 2))
+        c.drawLine(L_eq, T_eq, L_eq, B_eq, P(LN, a, 2))
+        n = max(2, int(len(EQ) * sm(u, 0, 1.6)))
+        pa = skia.Path()
+        fa = skia.Path()
+        fa.moveTo(L_eq, B_eq)
+        for j in range(n):
+            x = L_eq + (R_eq - L_eq) * j / (len(EQ) - 1)
+            y = B_eq - 10 - EQ[j] * (B_eq - T_eq - 25)
+            (pa.moveTo if j == 0 else pa.lineTo)(x, y)
+            fa.lineTo(x, y)
+        fa.lineTo(L_eq + (R_eq - L_eq) * (n - 1) / (len(EQ) - 1), B_eq)
+        fa.close()
+        c.drawPath(fa, P(G, 0.12 * a))
+        c.drawPath(pa, GL(G, 0.5 * a, 10))
+        c.drawPath(pa, P(G, a, 4))
+    elif st == 3:
+        for j, l in enumerate(("> connecting to broker API ...", "> authenticated (Interactive Brokers / MT5)", "> market data stream      OK", "> order routing           OK")):
+            tx(c, l, X, Y + 45 + j * 60, 'm', 28 if IS_LAND else 22, WH if j else MU, a * sm(u, j * 0.3, j * 0.3 + 0.2))
+        pu = 0.6 + 0.4 * math.sin(t * 6)
+        conn_x = pan_r - (240 if IS_LAND else 180)
+        c.drawCircle(conn_x, Y + 35, 10, P(G, a * pu))
+        tx(c, "CONNECTED", conn_x + 20, Y + 44, 'bb', 24 if IS_LAND else 18, G, a)
     else:
-        # Vertical 9:16 layout: stacked 2x2 or 4 rows
-        row_h = 190
-        for k, prod in enumerate(PRODUCTS):
-            g = smooth_step(t, card_t(k), card_t(k) + 0.45)
-            if g <= 0: continue
-            y = 300 + k * (row_h + 16)
-            draw_card_panel(draw, [50, y, W - 50, y + row_h], alpha=g, border_color=hex_to_rgb(prod["color"]))
-            draw_text(draw, prod["name"], 80, y + 25, "h", 32, TEXT_RGB, alpha=g)
-            draw_text(draw, prod["tagline"], 80, y + 68, "mb", 22, hex_to_rgb(prod["color"]), alpha=g)
-            draw_text(draw, prod["desc"], 80, y + 110, "b", 20, MUTED_RGB, alpha=g)
+        step_col = 180 if IS_LAND else 125
+        cols = [X + k * step_col for k in range(5)]
+        for j, h in enumerate(("TIME", "SIDE", "SYMBOL", "QTY", "STATUS")):
+            tx(c, h, cols[j], Y + 20, 'bb', 22 if IS_LAND else 16, MU, a)
+        for r_idx, row in enumerate(LOG):
+            b = a * sm(u, 0.2 + r_idx * 0.4, 0.4 + r_idx * 0.4)
+            for j, v in enumerate(row):
+                tx(c, v, cols[j], Y + 75 + r_idx * 65, 'm', 28 if IS_LAND else 20, (G if v == "BUY" else RD if v == "SELL" else G if v == "FILLED" else WH), b)
+        pu = 0.6 + 0.4 * math.sin(t * 6)
+        live_x = pan_r - (200 if IS_LAND else 150)
+        c.drawCircle(live_x, Y + 10, 10, P(G, a * pu))
+        tx(c, "LIVE", live_x + 20, Y + 18, 'bb', 24 if IS_LAND else 18, G, a)
 
-def scene_4(draw, t):
-    """Scene 4: The 5-Step Quant Pipeline - Rules -> Code -> Backtest -> FIX API -> Live"""
-    u = t - SS[4]
-    draw_text(draw, "From Quantitative Rules to Live Execution.", 100 if not IS_VERTICAL else 50,
-              120 if not IS_VERTICAL else 160, "h", 58 if not IS_VERTICAL else 46, TEXT_RGB)
-              
-    NODES = ["RULES", "MQL5 CODE", "BACKTEST", "BROKER API", "LIVE PROFITS"]
-    num_nodes = len(NODES)
-    
-    # Progress node dots along horizontal line
-    start_x = 180 if not IS_VERTICAL else 80
-    end_x = W - 180 if not IS_VERTICAL else W - 80
-    node_y = 230 if not IS_VERTICAL else 260
-    
-    step_w = (end_x - start_x) / (num_nodes - 1)
-    
-    # Connecting pipeline track
-    draw.line([(start_x, node_y), (end_x, node_y)], fill=BORDER_RGB, width=4)
-    
-    active_idx = 0
-    for k in range(num_nodes):
-        nx = start_x + k * step_w
-        t_n = node_t(k)
-        is_active = (t >= t_n)
-        if is_active:
-            active_idx = k
-            
-        circ_col = TEAL_RGB if is_active else BORDER_RGB
-        glow_rad = int(32 * bounce_out(clamp((t - t_n) / 0.35))) if is_active else 20
-        
-        draw.ellipse([nx - glow_rad, node_y - glow_rad, nx + glow_rad, node_y + glow_rad],
-                     fill=circ_col, outline=TEXT_RGB if is_active else BORDER_RGB, width=2)
-        draw_text(draw, str(k + 1), nx, node_y - 12, "mb", 22, COLORS["dark"] if is_active else MUTED_RGB, align="c")
-        draw_text(draw, NODES[k], nx, node_y + 40, "mb", 18 if not IS_VERTICAL else 15,
-                  TEXT_RGB if is_active else MUTED_RGB, align="c")
-                  
-    # Active Node Detail Display Box
-    box_l = 100 if not IS_VERTICAL else 50
-    box_r = W - 100 if not IS_VERTICAL else W - 50
-    box_t = 340 if not IS_VERTICAL else 370
-    box_b = 920 if not IS_VERTICAL else 1250
-    draw_card_panel(draw, [box_l, box_t, box_r, box_b], alpha=0.95)
-    
-    # Content depends on active node
-    if active_idx == 0:  # Rules
-        draw_text(draw, "// STRATEGY RULE SPECIFICATION", box_l + 50, box_t + 50, "mb", 26, TEAL_RGB)
-        rules = [
-            ("RULE 1:", "XAUUSD Tick Volatility Filter > 1.8 ATR"),
-            ("RULE 2:", "Micro-Liquidity Sweep Detection @ High/Low"),
-            ("RULE 3:", "Instant Dynamic Stop-Loss = 15 Pips Hard Fixed"),
-            ("RULE 4:", "Trailing Break-Even Lock at +10 Pips Profit")
-        ]
-        for r_i, (tag, val) in enumerate(rules):
-            draw_text(draw, tag, box_l + 50, box_t + 130 + r_i * 80, "h", 28, GOLD_RGB)
-            draw_text(draw, val, box_l + 200, box_t + 130 + r_i * 80, "m", 28, TEXT_RGB)
-            
-    elif active_idx == 1:  # MQL5 Code
-        draw_text(draw, "// COMPILED MQL5 & PYTHON 3.12 KERNEL", box_l + 50, box_t + 50, "mb", 26, TEAL_RGB)
-        code_lines = [
-            "void OnTick() {",
-            "    if (VolatilityFilter.Check() && Account.DailyLoss() < 2.0) {",
-            "        double lot = RiskEngine.CalculateLot(risk_pct=1.0);",
-            "        trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lot, ask, sl, tp);",
-            "        TelegramAlert.Send('Apex Scalper: BUY Filled @ ' + DoubleToString(ask));",
-            "    }",
-            "}"
-        ]
-        for c_i, cl in enumerate(code_lines):
-            col_l = GOLD_RGB if "OnTick" in cl or "void" in cl else GREEN_RGB if "BUY" in cl else TEXT_RGB
-            draw_text(draw, f"{c_i+1:02d}   {cl}", box_l + 50, box_t + 110 + c_i * 55, "m", 25, col_l)
-            
-    elif active_idx == 2:  # Backtest Equity Curve
-        draw_text(draw, "99.9% REAL TICK BACKTEST  \u00b7  MONTE CARLO VERIFIED", box_l + 50, box_t + 40, "mb", 26, GREEN_RGB)
-        # Skyrocketing equity curve
-        chart_x0 = box_l + 80
-        chart_x1 = box_r - 80
-        chart_y0 = box_b - 60
-        chart_y1 = box_t + 120
-        draw.line([(chart_x0, chart_y0), (chart_x1, chart_y0)], fill=BORDER_RGB, width=2)
-        draw.line([(chart_x0, chart_y1), (chart_x0, chart_y0)], fill=BORDER_RGB, width=2)
-        
-        eq_pts = []
-        n_pts = 60
-        for j in range(n_pts):
-            gx = chart_x0 + (chart_x1 - chart_x0) * (j / float(n_pts - 1))
-            gy = chart_y0 - (chart_y0 - chart_y1) * (0.85 * (j / float(n_pts - 1)) ** 1.35 + 0.04 * math.sin(j * 0.7))
-            eq_pts.append((gx, gy))
-            
-        for j in range(len(eq_pts) - 1):
-            draw.line([eq_pts[j], eq_pts[j + 1]], fill=GREEN_RGB, width=4)
-        draw_text(draw, "PROFIT FACTOR: 3.42  \u00b7  MAX DRAWDOWN: 2.1%", box_l + 80, box_t + 85, "h", 30, TEXT_RGB)
-        
-    elif active_idx == 3:  # Broker API
-        draw_text(draw, "SUB-MILLISECOND FIX 4.4 API BRIDGE", box_l + 50, box_t + 50, "mb", 26, BLUE_RGB)
-        broker_logs = [
-            "> Initializing FIX Protocol 4.4 Session ... [OK]",
-            "> Authenticating Broker Handshake (Interactive Brokers / MT5) ... [AUTHENTICATED]",
-            "> Raw Market Depth L2 Streaming ... [0.22ms Latency]",
-            "> Zero-Slippage Execution Engine ... [ARMED]"
-        ]
-        for b_i, bl in enumerate(broker_logs):
-            draw_text(draw, bl, box_l + 50, box_t + 130 + b_i * 70, "m", 26, TEAL_RGB if "OK" in bl or "ARMED" in bl else TEXT_RGB)
-            
-    else:  # Live Profits
-        draw_text(draw, "LIVE EXECUTION FEED  \u00b7  VERIFIED PROP FIRM AUDIT", box_l + 50, box_t + 40, "mb", 26, GREEN_RGB)
-        orders = [
-            ("09:31:02", "BUY", "XAUUSD", "2.00 Lots", "FILLED", "+$920.00"),
-            ("10:14:45", "BUY", "EURUSD", "5.00 Lots", "FILLED", "+$480.00"),
-            ("11:05:12", "SELL", "US30", "1.50 Lots", "FILLED", "+$1,150.00"),
-            ("12:22:30", "BUY", "XAUUSD", "2.00 Lots", "FILLED", "+$1,420.00")
-        ]
-        headers = ["TIME", "SIDE", "SYMBOL", "SIZE", "STATUS", "REALIZED PNL"]
-        col_xs = [box_l + 50, box_l + 200, box_l + 320, box_l + 470, box_l + 650, box_l + 820 if not IS_VERTICAL else box_l + 650]
-        
-        for h_i, h in enumerate(headers if not IS_VERTICAL else headers[:5]):
-            draw_text(draw, h, col_xs[h_i], box_t + 100, "mb", 22, MUTED_RGB)
-            
-        for o_i, row in enumerate(orders):
-            for r_j, val in enumerate(row if not IS_VERTICAL else row[:5]):
-                col_val = GREEN_RGB if val in ("BUY", "FILLED") or "+" in val else RED_RGB if val == "SELL" else TEXT_RGB
-                draw_text(draw, val, col_xs[r_j], box_t + 160 + o_i * 65, "m", 24, col_val)
-
-def scene_5(draw, t):
-    """Scene 5: Prop-Firm Risk Guardians & Live Telegram/Discord Alerts"""
+def s5(c, t):
     u = t - SS[5]
-    draw_text(draw, "Prop-Firm Risk Guardians Built-In.", 100 if not IS_VERTICAL else 50,
-              120 if not IS_VERTICAL else 160, "h", 58 if not IS_VERTICAL else 46, TEXT_RGB)
-    draw_text(draw, "100% compliant with FTMO, FundedNext, and institutional limits.", 100 if not IS_VERTICAL else 50,
-              190 if not IS_VERTICAL else 225, "b", 28 if not IS_VERTICAL else 24, MUTED_RGB)
-              
-    left_w = 680 if not IS_VERTICAL else W - 100
-    panel_y0 = 280
-    panel_y1 = 920 if not IS_VERTICAL else 680
+    tx_x = 520 if IS_LAND else 70 if not IS_SQUARE else 60
+    tx_y = 200 if IS_LAND else 260 if not IS_SQUARE else 170
+    head(c, "Risk management, built in.", tx_x, tx_y, 1, 64 if IS_LAND else 50)
     
-    # Left: Risk Limits Panel
-    draw_card_panel(draw, [100 if not IS_VERTICAL else 50, panel_y0, 100 + left_w, panel_y1], alpha=0.92)
-    draw_text(draw, "INSTITUTIONAL RISK CONTROLS", 140 if not IS_VERTICAL else 80, panel_y0 + 40, "mb", 24, TEAL_RGB)
+    if IS_LAND:
+        pan1_l, pan1_r, pan1_t, pan1_b = 520, 1120, 290, 900
+        X0, Y0, X1, Y1 = 1250, 280, 1690, 925
+    elif IS_SQUARE:
+        pan1_l, pan1_r, pan1_t, pan1_b = 60, 520, 270, 740
+        X0, Y0, X1, Y1 = 550, 260, 1020, 750
+    elif IS_PORT:
+        pan1_l, pan1_r, pan1_t, pan1_b = 70, 1010, 340, 640
+        X0, Y0, X1, Y1 = 140, 680, 940, 1080
+    else:  # 9:16
+        pan1_l, pan1_r, pan1_t, pan1_b = 70, 1010, 360, 720
+        X0, Y0, X1, Y1 = 140, 780, 940, 1260
+        
+    panel(c, pan1_l, pan1_t, pan1_r, pan1_b)
     
-    metrics = [
-        ("Max Daily Loss Guardian", "2.0% Hard Lock", 0.40, GREEN_RGB),
-        ("Max Overall Drawdown", "4.5% FTMO Cap", 0.35, GREEN_RGB),
-        ("Dynamic Risk Per Trade", "1.0% Fixed", 0.25, GOLD_RGB),
-        ("News Volatility Pause", "30min High Impact", 0.50, BLUE_RGB)
-    ]
+    for k, (lb, v, fr) in enumerate((("Max daily loss", "2%", 0.4), ("Risk per trade", "1%", 0.25), ("Max open trades", "3", 0.6))):
+        y = pan1_t + 90 + k * (180 if IS_LAND else 130 if IS_SQUARE else 105)
+        tx(c, lb, pan1_l + 40, y, 'bb', 28 if IS_LAND else 22, WH)
+        tx(c, v, pan1_r - 40, y, 'mb', 30 if IS_LAND else 24, G, 1, 'r')
+        rr(c, pan1_l + 40, y + 35, pan1_r - 40, y + 48, 6, P(LN))
+        g = sm(u, 0.3 + k * 0.25, 1.2 + k * 0.25)
+        if g > 0:
+            rr(c, pan1_l + 40, y + 35, pan1_l + 40 + (pan1_r - pan1_l - 80) * fr * g, y + 48, 6, P(G))
+            
+    # Phone mockup (Telegram & Discord alerts)
+    mx = (X0 + X1) / 2
+    c.drawRRect(skia.RRect.MakeRectXY(skia.Rect.MakeLTRB(X0, Y0, X1, Y1), 45, 45), GL(G, 0.16, 0, 26))
+    rr(c, X0, Y0, X1, Y1, 45, P('#05080A'))
+    rr(c, X0, Y0, X1, Y1, 45, P('#2E4038', 1, 4))
+    rr(c, mx - 55, Y0 + 16, mx + 55, Y0 + 40, 12, P('#000000'))
+    tx(c, "9:41", X0 + 35, Y0 + 38, 'bb', 18, WH)
+    tx(c, "Alerts", X0 + 35, Y0 + 95, 'h', 30, WH)
     
-    for m_i, (title, val, pct, col) in enumerate(metrics):
-        my = panel_y0 + 110 + m_i * 125
-        draw_text(draw, title, 140 if not IS_VERTICAL else 80, my, "h", 26, TEXT_RGB)
-        draw_text(draw, val, 100 + left_w - 40, my, "mb", 26, col, align="r")
-        # Progress track
-        track_x0 = 140 if not IS_VERTICAL else 80
-        track_x1 = 100 + left_w - 40
-        track_y = my + 45
-        draw_round_rect(draw, [track_x0, track_y, track_x1, track_y + 14], radius=7, fill=BORDER_RGB)
-        g_bar = smooth_step(u, 0.2 + m_i * 0.25, 0.9 + m_i * 0.25)
-        fill_w = (track_x1 - track_x0) * pct * g_bar
-        draw_round_rect(draw, [track_x0, track_y, track_x0 + fill_w, track_y + 14], radius=7, fill=col)
-        
-    # Right: Smartphone Mockup with Telegram Alerts
-    if not IS_VERTICAL:
-        phone_l = W - 680
-        phone_r = W - 180
-        phone_t = 270
-        phone_b = 940
-        draw_card_panel(draw, [phone_l, phone_t, phone_r, phone_b], alpha=0.98, border_color=BORDER_RGB)
-        # Notch
-        notch_cx = (phone_l + phone_r) / 2
-        draw_round_rect(draw, [notch_cx - 60, phone_t + 14, notch_cx + 60, phone_t + 36], radius=11, fill=COLORS["dark"])
-        draw_text(draw, "9:41", phone_l + 45, phone_t + 38, "mb", 18, TEXT_RGB)
-        draw_text(draw, "INSTANT ALERTS", phone_l + 40, phone_t + 95, "h", 30, TEXT_RGB)
-        
-        # Telegram notification card 1
-        card1_y = phone_t + 145
-        draw_card_panel(draw, [phone_l + 25, card1_y, phone_r - 25, card1_y + 170], alpha=0.95, border_color=TEAL_RGB)
-        draw.ellipse([phone_l + 45, card1_y + 20, phone_l + 75, card1_y + 50], fill=BLUE_RGB)
-        draw_text(draw, "Telegram \u00b7 ALGENZA Bot", phone_l + 90, card1_y + 25, "mb", 20, TEXT_RGB)
-        draw_text(draw, "now", phone_r - 45, card1_y + 25, "b", 18, MUTED_RGB, align="r")
-        draw_text(draw, "Apex Scalper: BUY XAUUSD", phone_l + 45, card1_y + 75, "h", 22, GREEN_RGB)
-        draw_text(draw, "Entry: 2684.50 | SL: 2679.50 | TP: 2705.00", phone_l + 45, card1_y + 115, "mb", 18, MUTED_RGB)
-        
-        # Discord notification card 2
-        card2_y = card1_y + 195
-        draw_card_panel(draw, [phone_l + 25, card2_y, phone_r - 25, card2_y + 170], alpha=0.95, border_color=GOLD_RGB)
-        draw.ellipse([phone_l + 45, card2_y + 20, phone_l + 75, card2_y + 50], fill=(88, 101, 242))
-        draw_text(draw, "Discord \u00b7 Prop Guard", phone_l + 90, card2_y + 25, "mb", 20, TEXT_RGB)
-        draw_text(draw, "now", phone_r - 45, card2_y + 25, "b", 18, MUTED_RGB, align="r")
-        draw_text(draw, "Trailing Take-Profit Executed", phone_l + 45, card2_y + 75, "h", 22, GOLD_RGB)
-        draw_text(draw, "Realized: +$1,420.00 | FTMO Safe", phone_l + 45, card2_y + 115, "mb", 18, MUTED_RGB)
+    for k, (app, col, l1, l2) in enumerate((("Telegram", "#2AABEE", "BUY  XAUUSD  @ 2704.66", "SL 2697.50  \u00b7  TP 2718.00"), ("Discord", "#5865F2", "Prop Target Reached", "Daily drawdown locked safely"))):
+        g = sm(t, alert_t(k), alert_t(k) + 0.45)
+        if g <= 0: continue
+        x = X0 + 20
+        y = Y0 + 130 + k * (180 if not IS_SQUARE else 160) - (1 - g) * 40
+        panel(c, x, y, X1 - 20, y + (160 if not IS_SQUARE else 145), g)
+        c.drawCircle(x + 35, y + 36, 12, P(col, g))
+        tx(c, app, x + 56, y + 44, 'bb', 22 if not IS_SQUARE else 18, WH, g)
+        tx(c, "now", X1 - 38, y + 44, 'b', 18 if not IS_SQUARE else 15, MU, g, 'r')
+        tx(c, l1, x + 24, y + 92, 'bb', 22 if not IS_SQUARE else 17, WH, g)
+        tx(c, l2, x + 24, y + 128, 'b', 19 if not IS_SQUARE else 15, MU, g)
 
-def scene_6(draw, t):
-    """Scene 6: 100% Proprietary Code Ownership & Clean Architecture"""
+FILES = ["ApexScalper_XAUUSD.mq5", "TitanGridEngine.mq5", "RiskGuardian_PropPass.py", "FIX_Bridge.cpp", "README_Setup.md"]
+CHK = ["Clean, modular source code", "Full documentation", "Dedicated engineering support"]
+
+def s6(c, t):
     u = t - SS[6]
-    draw_text(draw, "100% Proprietary Code Ownership.", 100 if not IS_VERTICAL else 50,
-              120 if not IS_VERTICAL else 160, "h", 58 if not IS_VERTICAL else 46, TEXT_RGB)
-    draw_text(draw, "No black box. You own every line of code, test report, and file.", 100 if not IS_VERTICAL else 50,
-              190 if not IS_VERTICAL else 225, "b", 28 if not IS_VERTICAL else 24, MUTED_RGB)
-              
-    box_w = 640 if not IS_VERTICAL else W - 100
-    draw_card_panel(draw, [100 if not IS_VERTICAL else 50, 280, 100 + box_w, 900 if not IS_VERTICAL else 680], alpha=0.92)
-    draw_text(draw, "ALGENZA_DEPLOYMENT_PACKAGE /", 140 if not IS_VERTICAL else 80, 330, "mb", 22, MUTED_RGB)
+    tx_x = 520 if IS_LAND else 70 if not IS_SQUARE else 60
+    tx_y = 200 if IS_LAND else 260 if not IS_SQUARE else 170
+    head(c, "No black box.", tx_x, tx_y, 1, 76 if IS_LAND else 56)
+    sub(c, "You own everything we build.", tx_x, tx_y + (58 if IS_LAND else 46), 1, 32 if IS_LAND else 24)
     
-    files = [
-        ("ApexScalper_XAUUSD.mq5", "MQL5 High-Speed Scalper Source", GOLD_RGB),
-        ("TitanGridEngine.mq5", "Dynamic Multi-Asset Hedging", TEAL_RGB),
-        ("RiskGuardian_PropPass.py", "Hard Daily Loss Guard Module", GREEN_RGB),
-        ("FIX_Protocol_Bridge.cpp", "Sub-Millisecond Execution Bridge", BLUE_RGB),
-        ("RealTick_Backtest_99.9.pdf", "Verified Institutional Tick Audit", ROSE_RGB),
-        ("README_Setup_Guide.md", "Full Documentation & Deployment Guide", TEXT_RGB)
-    ]
-    
-    for f_i, (fname, fdesc, fcol) in enumerate(files):
-        g = smooth_step(u, 0.2 + f_i * 0.18, 0.6 + f_i * 0.18)
-        fy = 390 + f_i * 78
-        draw_round_rect(draw, [140 if not IS_VERTICAL else 80, fy - 22, 168 if not IS_VERTICAL else 108, fy + 6], radius=4, fill=fcol)
-        draw_text(draw, fname, 185 if not IS_VERTICAL else 125, fy - 18, "m", 24, TEXT_RGB, alpha=g)
-        draw_text(draw, fdesc, 185 if not IS_VERTICAL else 125, fy + 14, "b", 17, MUTED_RGB, alpha=g)
+    if IS_LAND:
+        pan_l, pan_r, pan_t, pan_b = 520, 1080, 310, 880
+        chk_x = 1200
+        chk_y_base, chk_step = 440, 160
+    elif IS_SQUARE:
+        pan_l, pan_r, pan_t, pan_b = 60, 540, 270, 740
+        chk_x = 590
+        chk_y_base, chk_step = 370, 130
+    elif IS_PORT:
+        pan_l, pan_r, pan_t, pan_b = 70, 1010, 340, 760
+        chk_x = 120
+        chk_y_base, chk_step = 840, 120
+    else:  # 9:16
+        pan_l, pan_r, pan_t, pan_b = 70, 1010, 360, 820
+        chk_x = 120
+        chk_y_base, chk_step = 920, 140
         
-    # Right: Institutional Trust Badges with Checkmarks
-    right_x = W - 780 if not IS_VERTICAL else 80
-    checklist = [
-        ("Clean, Modular Source Code", "Fully commented & standardized architecture"),
-        ("Institutional Documentation", "Complete video setup and parameter optimization"),
-        ("Dedicated Engineering Support", "Direct strategy guidance with Muhammad Hassan")
-    ]
+    panel(c, pan_l, pan_t, pan_r, pan_b)
+    tx(c, "ALGENZA_DEPLOYMENT_PACKAGE /", pan_l + 40, pan_t + 55, 'mb', 24 if IS_LAND else 18, MU)
     
-    for c_i, (c_title, c_sub) in enumerate(checklist):
-        g = smooth_step(u, 0.4 + c_i * 0.35, 0.9 + c_i * 0.35)
-        cy = 380 + c_i * 170 if not IS_VERTICAL else 740 + c_i * 120
-        # Checkmark Circle
-        draw.ellipse([right_x - 30, cy - 30, right_x + 30, cy + 30], fill=GREEN_RGB)
-        # Checkmark tick lines
-        draw.line([(right_x - 14, cy - 2), (right_x - 4, cy + 10)], fill=COLORS["dark"], width=4)
-        draw.line([(right_x - 4, cy + 10), (right_x + 14, cy - 10)], fill=COLORS["dark"], width=4)
+    for k, fn in enumerate(FILES):
+        a = sm(u, 0.3 + k * 0.15, 0.6 + k * 0.15)
+        y = pan_t + (115 if IS_LAND else 105) + k * (80 if IS_LAND else 65)
+        rr(c, pan_l + 45, y - 26, pan_l + 70, y + 4, 4, P(G, a, 3))
+        tx(c, fn, pan_l + 90, y, 'm', 28 if IS_LAND else 19, WH, a)
         
-        draw_text(draw, c_title, right_x + 55, cy - 16, "h", 32 if not IS_VERTICAL else 26, TEXT_RGB, alpha=g)
-        draw_text(draw, c_sub, right_x + 55, cy + 24, "b", 22 if not IS_VERTICAL else 18, MUTED_RGB, alpha=g)
+    for k, s in enumerate(CHK):
+        y = chk_y_base + k * chk_step
+        g = cl((t - check_t(k)) / 0.4)
+        c.drawCircle(chk_x, y, 28, P(LN, 1, 3))
+        if g > 0:
+            c.drawCircle(chk_x, y, 28 * bo(g), P(G))
+            pa = skia.Path()
+            pa.moveTo(chk_x - 12, y)
+            pa.lineTo(chk_x - 3, y + 10)
+            pa.lineTo(chk_x + 14, y - 10)
+            c.drawPath(pa, P(DK, g, 5))
+        tx(c, s, chk_x + 50, y + 11, 'bb', 34 if IS_LAND else 24, WH, 0.35 + 0.65 * g)
 
-def scene_7(draw, t):
-    """Scene 7: Verified Performance Metrics & Track Record"""
+def star(c, cx, cy, R, p):
+    pa = skia.Path()
+    for j in range(10):
+        rad = R if j % 2 == 0 else R * 0.45
+        an = -math.pi / 2 + j * math.pi / 5
+        (pa.moveTo if j == 0 else pa.lineTo)(cx + rad * math.cos(an), cy + rad * math.sin(an))
+    pa.close()
+    c.drawPath(pa, p)
+
+def s7(c, t):
     u = t - SS[7]
-    draw_text(draw, "Proven Track Record in Production.", 100 if not IS_VERTICAL else 50,
-              120 if not IS_VERTICAL else 160, "h", 58 if not IS_VERTICAL else 46, TEXT_RGB)
-    draw_text(draw, "Over 200+ funded traders and institutional funds rely on ALGENZA.", 100 if not IS_VERTICAL else 50,
-              190 if not IS_VERTICAL else 225, "b", 28 if not IS_VERTICAL else 24, MUTED_RGB)
-              
-    num_metrics = len(METRICS)
-    if not IS_VERTICAL:
-        card_w = (W - 200 - (num_metrics - 1) * 30) / num_metrics
-        card_h = 560
-        y = 280
-        for k, met in enumerate(METRICS):
-            g = smooth_step(u, 0.25 + k * 0.3, 0.75 + k * 0.3)
-            if g <= 0: continue
-            x = 100 + k * (card_w + 30)
-            draw_card_panel(draw, [x, y, x + card_w, y + card_h], alpha=g, border_color=hex_to_rgb(met["color"]))
+    tx_x = 520 if IS_LAND else 70 if not IS_SQUARE else 60
+    tx_y = 200 if IS_LAND else 260 if not IS_SQUARE else 170
+    head(c, "Proven in production.", tx_x, tx_y, 1, 64 if IS_LAND else 50)
+    
+    for k in range(2):
+        g = sm(u, 0.35 + k * 0.4, 0.85 + k * 0.4)
+        if g <= 0: continue
+        
+        if IS_LAND:
+            x = 540 + k * 640
+            y = 310 + (1 - g) * 50
+            card_w, card_h = 560, 440
+        elif IS_SQUARE:
+            x = 60 + k * 500
+            y = 280 + (1 - g) * 40
+            card_w, card_h = 460, 400
+        elif IS_PORT:
+            x = 70
+            y = 340 + k * 370 + (1 - g) * 40
+            card_w, card_h = 940, 330
+        else:  # 9:16
+            x = 70
+            y = 380 + k * 450 + (1 - g) * 50
+            card_w, card_h = 940, 400
             
-            # Counter Value
-            v = smooth_step(u, 0.3 + k * 0.3, 1.6 + k * 0.3)
-            draw_text(draw, met["num"], x + card_w / 2, y + 170, "h", 68, hex_to_rgb(met["color"]), alpha=g, align="c")
-            draw_text(draw, met["label"], x + card_w / 2, y + 270, "b", 24, TEXT_RGB, alpha=g, align="c")
-            
-            # Five golden 5-pointed stars
-            for s_idx in range(5):
-                star_cx = x + card_w / 2 - 80 + s_idx * 40
-                star_cy = y + 360
-                star_r_out = 12
-                star_r_in = 5
-                star_pts = []
-                for sp in range(10):
-                    angle = -math.pi / 2 + sp * math.pi / 5
-                    r = star_r_out if sp % 2 == 0 else star_r_in
-                    star_pts.append((star_cx + r * math.cos(angle), star_cy + r * math.sin(angle)))
-                draw.polygon(star_pts, fill=GOLD_RGB)
-            draw_text(draw, "5.0 Verified Rating", x + card_w / 2, y + 405, "mb", 20, GOLD_RGB, alpha=g, align="c")
-    else:
-        # Vertical 9:16 layout
-        row_h = 160
-        for k, met in enumerate(METRICS):
-            g = smooth_step(u, 0.25 + k * 0.3, 0.75 + k * 0.3)
-            if g <= 0: continue
-            y = 300 + k * (row_h + 20)
-            draw_card_panel(draw, [50, y, W - 50, y + row_h], alpha=g, border_color=hex_to_rgb(met["color"]))
-            draw_text(draw, met["num"], 90, y + 40, "h", 58, hex_to_rgb(met["color"]), alpha=g)
-            draw_text(draw, met["label"], 90, y + 110, "b", 22, TEXT_RGB, alpha=g)
+        cx = x + card_w / 2
+        panel(c, x, y, x + card_w, y + card_h, g)
+        rr(c, x, y, x + card_w, y + 6, 3, P(G, g))
+        v = sm(u, 0.4 + k * 0.4, 1.8 + k * 0.4)
+        
+        if k == 0:
+            tx(c, f"{int(round(200 * v))}+", cx, y + (220 if IS_LAND else 200), 'h', 130 if IS_LAND else 100, G, g, 'c')
+            tx(c, "algorithms delivered", cx, y + (320 if IS_LAND else 290), 'b', 32 if IS_LAND else 24, MU, g, 'c')
+        else:
+            tx(c, f"{4.9 * v:.1f}", cx, y + (200 if IS_LAND else 180), 'h', 120 if IS_LAND else 95, G, g, 'c')
+            for j in range(5):
+                q = sm(u, 1.0 + j * 0.12, 1.3 + j * 0.12)
+                star(c, cx - 100 + j * 50, y + (260 if IS_LAND else 240), 22, P(G, g * (0.25 + 0.75 * q)))
+            tx(c, "client rating", cx, y + (330 if IS_LAND else 300), 'b', 32 if IS_LAND else 24, MU, g, 'c')
 
-def scene_8(draw, t):
-    """Scene 8: High-Converting Call to Action"""
+def s8(c, t):
     u = t - SS[8]
-    cx = W / 2.0
-    cy = (H / 2.0) - (0 if not IS_VERTICAL else 140)
+    a = sm(u, 0.1, 0.5)
     
-    # Glowing ALGENZA Crest
-    draw_algenza_logo_mark(draw, cx, cy - 140, size=150, alpha=smooth_step(u, 0.1, 0.6))
+    if IS_LAND:
+        cx, cy = 800, 370
+        head_y, sub_y = 470, 535
+        btn_cx, btn_cy = 1030, 640
+        btn_w = 460
+    elif IS_SQUARE:
+        cx, cy = 540, 310
+        head_y, sub_y = 410, 475
+        btn_cx, btn_cy = 540, 580
+        btn_w = 480
+    elif IS_PORT:
+        cx, cy = 540, 400
+        head_y, sub_y = 510, 580
+        btn_cx, btn_cy = 540, 700
+        btn_w = 540
+    else:  # 9:16
+        cx, cy = 540, 480
+        head_y, sub_y = 590, 660
+        btn_cx, btn_cy = 540, 780
+        btn_w = 620
+        
+    logo(c, cx, cy, 52 if IS_LAND else 44, a, glow=0.4, al='l' if IS_LAND else 'c')
+    head(c, "Deploy your algorithmic edge.", cx if IS_LAND else 70, head_y, sm(u, 0.2, 0.7), 64 if IS_LAND else 48)
+    sub(c, "Visit algenza.com or request a custom build.", cx if IS_LAND else 70, sub_y, sm(u, 0.5, 1.0), 34 if IS_LAND else 25)
     
-    draw_text(draw, "Ready to Automate Your Trading Edge?", cx, cy + 20, "h", 64 if not IS_VERTICAL else 48, TEXT_RGB,
-              alpha=smooth_step(u, 0.25, 0.75), align="c")
-    draw_text(draw, "Visit algenza.com to deploy institutional EAs or request a custom build.", cx, cy + 95, "b", 32 if not IS_VERTICAL else 24,
-              MUTED_RGB, alpha=smooth_step(u, 0.45, 0.95), align="c")
-              
-    # Glowing CTA Button
-    btn_g = bounce_out(clamp((t - BTN_T) / 0.55))
-    if btn_g > 0.01:
-        btn_w = int(520 * btn_g)
-        btn_h = int(90 * btn_g)
-        btn_x0 = cx - btn_w / 2
-        btn_y0 = cy + 180 - btn_h / 2
-        
-        # Outer glow
-        draw_round_rect(draw, [btn_x0 - 6, btn_y0 - 6, btn_x0 + btn_w + 6, btn_y0 + btn_h + 6],
-                        radius=int(btn_h / 2) + 6, fill=(112, 224, 214, int(80 * btn_g)))
-        # Button body
-        draw_round_rect(draw, [btn_x0, btn_y0, btn_x0 + btn_w, btn_y0 + btn_h],
-                        radius=int(btn_h / 2), fill=TEAL_RGB)
-                        
-        cta_label = os.environ.get("CTA_LABEL", "VISIT ALGENZA.COM")
-        draw_text(draw, cta_label, cx, btn_y0 + int(24 * btn_g), "h", int(36 * btn_g), COLORS["dark"], align="c")
-        
-    # Founder credibility badge
-    draw_text(draw, f"Lead Quantitative Engineer: {FOUNDER_NAME}", cx, cy + 290, "mb", 22, GOLD_RGB,
-              alpha=smooth_step(u, 0.8, 1.4), align="c")
-    draw_text(draw, f"WhatsApp Direct: {WHATSAPP_NUMBER}  \u00b7  {BRAND_DISPLAY_URL}", cx, cy + 325, "b", 20, MUTED_RGB,
-              alpha=smooth_step(u, 1.0, 1.6), align="c")
+    g = bo((t - BTN_T) / 0.5)
+    if g > 0.01:
+        hw, hh = btn_w / 2 * g, 44 * g
+        c.drawRRect(skia.RRect.MakeRectXY(skia.Rect.MakeLTRB(btn_cx - hw, btn_cy - hh, btn_cx + hw, btn_cy + hh), hh, hh), GL(G, 0.55, 0, 22))
+        rr(c, btn_cx - hw, btn_cy - hh, btn_cx + hw, btn_cy + hh, hh, P(G))
+        lab = "algenza.com"
+        tx(c, lab, btn_cx, btn_cy + 13, 'bb', int(38 * g) + 1, DK, 1, 'c')
 
-SCENES = [scene_0, scene_1, scene_2, scene_3, scene_4, scene_5, scene_6, scene_7, scene_8]
+SC = [s0, s1, s2, s3, s4, s5, s6, s7, s8]
 
-# 11. Word-Wrap Subtitle Bar
-def wrap_text(s, max_chars=60):
-    words = s.split()
-    lines = []
+# 9. Subtitle Wrapping & Display
+def wrap(s, n):
+    out = []
     cur = ""
-    for w in words:
-        if len(cur) + len(w) + 1 > max_chars and cur:
-            lines.append(cur)
+    for w in s.split():
+        if len(cur) + len(w) + 1 > n and cur:
+            out.append(cur)
             cur = w
         else:
             cur = (cur + " " + w).strip()
-    if cur:
-        lines.append(cur)
-    return lines
+    out.append(cur)
+    return out
 
-def draw_subtitles(draw, t):
-    for i, s0 in enumerate(ST):
-        e = s0 + D[i]
-        if s0 - 0.1 <= t <= e + 0.35:
-            alpha = min(smooth_step(t, s0 - 0.1, s0 + 0.15), 1.0 - smooth_step(t, e + 0.05, e + 0.35))
-            if alpha <= 0.01:
-                continue
-                
-            lines = wrap_text(LINES[i], max_chars=56 if not IS_VERTICAL else 34)
-            sub_y0 = H - 90 - (len(lines) - 1) * 44 if not IS_VERTICAL else H - 160 - (len(lines) - 1) * 44
-            
-            # Find max text width
-            f = get_font("b", 30 if not IS_VERTICAL else 26)
-            max_w = 0
-            for l in lines:
-                bb = draw.textbbox((0, 0), l, font=f)
-                max_w = max(max_w, bb[2] - bb[0])
-                
-            pill_l = W / 2 - max_w / 2 - 28
-            pill_r = W / 2 + max_w / 2 + 28
-            pill_t = sub_y0 - 24
-            pill_b = sub_y0 + len(lines) * 44 + 6
-            
-            draw_round_rect(draw, [pill_l, pill_t, pill_r, pill_b], radius=14,
-                            fill=(5, 11, 20, int(210 * alpha)),
-                            outline=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], int(160 * alpha)), width=1)
-                            
-            for j, l in enumerate(lines):
-                draw_text(draw, l, W / 2, sub_y0 + j * 44 - 10, "b", 30 if not IS_VERTICAL else 26,
-                          TEXT_RGB, alpha=alpha, align="c")
+def subs(c, t):
+    wrap_limit = 72 if IS_LAND else 46 if IS_SQUARE else 42
+    font_sz = 30 if IS_LAND else 24
+    sub_cx = W / 2
+    sub_y_base = (H - 35) if IS_LAND else (H - 45) if IS_SQUARE else (H - 70) if IS_PORT else (H - 140)
+    
+    for i, s0_ in enumerate(ST):
+        e = s0_ + D[i]
+        if s0_ - 0.1 <= t <= e + 0.3:
+            a = min(sm(t, s0_ - 0.1, s0_ + 0.15), 1 - sm(t, e + 0.05, e + 0.3))
+            ls = wrap(LINES[i], wrap_limit)
+            f = F('b', font_sz)
+            mw = max(f.measureText(l) for l in ls)
+            y0 = sub_y_base - (len(ls) - 1) * 36
+            rr(c, sub_cx - mw / 2 - 24, y0 - 34, sub_cx + mw / 2 + 24, sub_y_base + 16, 12, P('#000000', 0.55 * a))
+            for j, l in enumerate(ls):
+                tx(c, l, sub_cx, y0 + j * 36, 'b', font_sz, WH, a, 'c')
 
-# 12. Persistent Top Watermark
-def draw_watermark(draw, t):
-    if t < 1.0:
-        return
-    a = smooth_step(t, 1.0, 2.0) * (1.0 - smooth_step(t, SS[-1] + 1.0, SS[-1] + 2.0))
-    if a <= 0.01:
-        return
-        
-    wx = 60
-    wy = 55
-    draw_algenza_logo_mark(draw, wx + 20, wy + 20, size=36, alpha=a)
-    draw_text(draw, "ALGENZA", wx + 52, wy + 8, "h", 26, TEXT_RGB, alpha=a)
-    draw_text(draw, "PRO", wx + 190, wy + 11, "mb", 16, TEAL_RGB, alpha=a)
+def wm(c, t):
+    a = sm(t, SS[2] + 1.5, SS[2] + 2.2) * (1 - sm(t, SS[NS - 1], SS[NS - 1] + 0.4))
+    if a <= 0: return
+    logo(c, 56 if IS_LAND else 50, 76 if IS_LAND else 90 if not IS_VERT else 110, 32 if IS_LAND else 26, a)
 
-# 13. Master Frame Renderer (with Scene Crossfade Transitions)
-def render_frame(frame_idx):
-    t = frame_idx / float(FPS)
-    img = BACKGROUND_LAYER.copy()
-    draw = ImageDraw.Draw(img)
+# Floating ambient particles
+_pr = np.random.default_rng(11)
+PT = list(zip(_pr.uniform(0, W, 70), _pr.uniform(0, H, 70), _pr.uniform(8, 30, 70), _pr.uniform(1.2, 3.2, 70), _pr.uniform(0, 6.28, 70)))
+
+def parts(c, t):
+    for x0, y0, sp, sz, ph in PT:
+        y = (y0 - t * sp) % H
+        x = x0 + math.sin(t * 0.5 + ph) * 18
+        c.drawCircle(x, y, sz, P(G, 0.10 + 0.18 * (0.5 + 0.5 * math.sin(t * 2 + ph))))
+
+def sweep(c, t):
+    for i in range(1, NS):
+        u = (t - (SS[i] - 0.15)) / 0.55
+        if 0 < u < 1:
+            x = -100 + u * (W + 200)
+            c.drawRect(skia.Rect.MakeLTRB(x - 40, 0, x + 40, H), GL(G, 0.18, 0, 30))
+            c.drawRect(skia.Rect.MakeLTRB(x - 1.5, 0, x + 1.5, H), P('#A7F3C9', 0.7))
+
+SURF = skia.Surface(W, H)
+
+def frame(fi):
+    t = fi / FPS
+    c = SURF.getCanvas()
+    c.drawImage(BG, 0, 0)
+    parts(c, t)
+    CUR[0] = t
     
-    # Animated grid pulse overlay (subtle depth effect)
-    grid_pulse = 0.5 + 0.5 * math.sin(t * 0.6)
-    grid_pulse_alpha = int(15 * grid_pulse)
-    if grid_pulse_alpha > 2:
-        # Vertical scan line sweeping across the frame
-        scan_x = int((t * 80) % (W + 200)) - 100
-        for dx in range(-60, 61, 4):
-            line_alpha = int(grid_pulse_alpha * max(0, 1.0 - abs(dx) / 60.0))
-            if 0 <= scan_x + dx < W:
-                draw.line([(scan_x + dx, 0), (scan_x + dx, H)],
-                          fill=(TEAL_RGB[0], TEAL_RGB[1], TEAL_RGB[2], line_alpha), width=1)
-    
-    # Floating ambient particles
-    draw_particles(draw, t)
-    
-    # Active Scene Rendering with Crossfade Transitions
     for i in range(NS):
-        if not (SS[i] - 0.05 <= t <= SE[i] + 0.08):
-            continue
+        if not (SS[i] - 0.01 <= t <= SE[i] + 0.06): continue
+        a = 1.0 if i == 0 else sm(t, SS[i], SS[i] + 0.35)
+        CUR[1] = SS[i] + (2.0 if i == 0 else 0)
+        if i < NS - 1: a *= 1 - sm(t, SE[i] - 0.3, SE[i] + 0.05)
+        if a <= 0.002: continue
         
-        # Scene entry fade-in (smooth blend instead of hard cut)
-        fade_in_alpha = clamp((t - SS[i]) / 0.45, 0.0, 1.0) if i > 0 else 1.0
-        # Scene exit fade-out
-        fade_out_alpha = clamp((SE[i] - t) / 0.35, 0.0, 1.0) if i < NS - 1 else 1.0
-        scene_alpha = min(fade_in_alpha, fade_out_alpha)
+        c.saveLayerAlpha(None, int(a * 255))
+        # Subtle slow cinematic Ken Burns push-in
+        z = 1 + 0.035 * cl((t - SS[i]) / (SE[i] - SS[i]))
+        c.translate(W / 2, H / 2 + (1 - a) * 18)
+        c.scale(z, z)
+        c.translate(-W / 2, -H / 2)
+        SC[i](c, t)
+        c.restore()
         
-        if scene_alpha < 0.999 and scene_alpha > 0.01:
-            # Render scene to separate layer for alpha compositing
-            scene_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-            scene_draw = ImageDraw.Draw(scene_layer)
-            SCENES[i](scene_draw, t)
-            # Apply scene alpha
-            alpha_mask = scene_layer.split()[3]
-            alpha_mask = alpha_mask.point(lambda p: int(p * scene_alpha))
-            scene_layer.putalpha(alpha_mask)
-            img = Image.alpha_composite(img, scene_layer)
-        else:
-            SCENES[i](draw, t)
-        
-    # Sentinel HUD Character Positioning
-    # In 16:9, positioned on right; in 9:16 positioned near bottom/mid
-    if not IS_VERTICAL:
-        char_x = W - 320
-        char_y = H - 340
-        char_scale = 1.0
+    sweep(c, t)
+    wm(c, t)
+    char(c, t, float(MO[min(fi, len(MO) - 1)]))
+    subs(c, t)
+    return SURF
+
+if __name__ == '__main__':
+    clean_mode = MODE.replace(':', 'x')
+    if len(sys.argv) > 1 and sys.argv[1] == 'still':
+        for ts in sys.argv[2:]:
+            out_name = f'still_{clean_mode}_{ts}.png'
+            frame(int(float(ts) * FPS)).makeImageSnapshot().save(out_name, skia.kPNG)
+            print(f"Saved {out_name}")
     else:
-        char_x = W / 2.0
-        char_y = H - 380
-        char_scale = 0.85
+        w = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+        n = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+        out_seg = sys.argv[4] if len(sys.argv) > 4 else f'seg_{clean_mode}_{w}.mp4'
+        NF = int(END * FPS)
+        a = NF * w // n
+        b = NF * (w + 1) // n
         
-    mouth_val = get_mouth_val(t)
-    cur_scene_idx = 0
-    for k in range(NS):
-        if t >= SS[k]:
-            cur_scene_idx = k
-    draw_quant_sentinel(draw, t, mouth_val, char_x, char_y, scale=char_scale, scene_idx=cur_scene_idx)
-    
-    # Watermark & Subtitles
-    draw_watermark(draw, t)
-    draw_subtitles(draw, t)
-    
-    return img
-
-# 14. CLI Interface & Parallel Segment Worker
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python render.py [still <ts> ... | enc <worker_idx> <num_workers> | full <output.mp4>]")
-        return
-
-    mode = sys.argv[1].lower()
-    
-    if mode == "still":
-        timestamps = [float(x) for x in sys.argv[2:]] if len(sys.argv) > 2 else [3.0, 15.0, 25.0, 45.0, 60.0]
-        for ts in timestamps:
-            fi = int(ts * FPS)
-            img = render_frame(fi)
-            out_png = f"still_{ts:.1f}.png"
-            img.save(out_png)
-            print(f"Saved snapshot: {out_png}")
-            
-    elif mode == "enc":
-        w = int(sys.argv[2])
-        n = int(sys.argv[3])
-        total_frames = int(END * FPS)
-        a = total_frames * w // n
-        b = total_frames * (w + 1) // n
-        out_seg = sys.argv[4] if len(sys.argv) > 4 else f"seg{w}.mp4"
-        
-        print(f"Rendering segment {w}/{n} (frames {a} to {b}) into {out_seg}...", flush=True)
         cmd = [
-            FFMPEG_EXE, "-y", "-loglevel", "error",
-            "-f", "rawvideo", "-pix_fmt", "rgba",
-            "-s", f"{W}x{H}", "-r", str(FPS),
-            "-i", "-",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "16",
-            "-pix_fmt", "yuv420p", "-g", "60",
-            "-bf", "0", "-flags", "+cgop",
+            FFMPEG_EXE, '-y', '-loglevel', 'error',
+            '-f', 'rawvideo', '-pix_fmt', 'rgba',
+            '-s', f'{W}x{H}', '-r', str(FPS),
+            '-i', '-',
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
+            '-pix_fmt', 'yuv420p', '-g', '60',
+            '-bf', '0', '-flags', '+cgop',
             out_seg
         ]
-        
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         for fi in range(a, b):
-            frame_img = render_frame(fi)
-            proc.stdin.write(frame_img.tobytes())
-            
-        proc.stdin.close()
-        proc.wait()
-        print(f"Segment {w} complete.")
-        
-    elif mode == "full":
-        out_file = sys.argv[2] if len(sys.argv) > 2 else "algenza-explainer-raw.mp4"
-        total_frames = int(END * FPS)
-        print(f"Rendering full video ({total_frames} frames @ {W}x{H}, 60fps) into {out_file}...")
-        cmd = [
-            FFMPEG_EXE, "-y", "-loglevel", "info",
-            "-f", "rawvideo", "-pix_fmt", "rgba",
-            "-s", f"{W}x{H}", "-r", str(FPS),
-            "-i", "-",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "16",
-            "-tune", "animation",
-            "-pix_fmt", "yuv420p", "-g", "120",
-            "-bf", "2", "-b_adapt", "1",
-            out_file
-        ]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-        for fi in range(total_frames):
-            frame_img = render_frame(fi)
-            proc.stdin.write(frame_img.tobytes())
-            if fi % 120 == 0:
-                print(f"  Frame {fi}/{total_frames} ({fi/total_frames*100:.1f}%)")
-        proc.stdin.close()
-        proc.wait()
-        print(f"Full render complete: {out_file}")
-
-if __name__ == "__main__":
-    main()
+            p.stdin.write(frame(fi).makeImageSnapshot().toarray(colorType=skia.kRGBA_8888_ColorType).tobytes())
+        p.stdin.close()
+        p.wait()
+        print(f"seg {w} done", flush=True)

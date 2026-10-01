@@ -5,10 +5,10 @@ echo     ALGENZA VIDEO ENGINE - HIGH-PERFORMANCE VIDEO BUILDER
 echo     algenza.com  -  Lead Architect: Muhammad Hassan
 echo =================================================================
 
-python -m pip install -r requirements.txt
-python tts.py
-python mix.py
-python cli.py build --aspect 16:9
+set ASPECT=%1
+if "%ASPECT%"=="" set ASPECT=16:9
+
+python cli.py build --aspect %ASPECT% --workers 4
 echo.
-echo Build finished! Check assets\algenza-explainer-16x9.mp4
+echo Build finished! Check assets\ directory.
 pause

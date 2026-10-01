@@ -138,11 +138,11 @@ def main():
     
     # preview
     p_prev = subparsers.add_parser("preview", help="Render still frames for preview")
-    p_prev.add_argument("--aspect", default="16:9", choices=["16:9", "9:16", "1:1"])
+    p_prev.add_argument("--aspect", default="16:9", choices=["16:9", "9:16", "1:1", "4:5"])
     
     # build
     p_build = subparsers.add_parser("build", help="Build and render explainer video")
-    p_build.add_argument("--aspect", default="16:9", choices=["16:9", "9:16", "1:1", "all"])
+    p_build.add_argument("--aspect", default="16:9", choices=["16:9", "9:16", "1:1", "4:5", "all"])
     p_build.add_argument("--workers", type=int, default=4, help="Number of parallel render workers")
     p_build.add_argument("--skip-tts", action="store_true", help="Skip TTS regeneration")
     p_build.add_argument("--skip-mix", action="store_true", help="Skip audio mix regeneration")
@@ -164,7 +164,7 @@ def main():
     if args.command == "preview":
         env = os.environ.copy()
         env["ASPECT"] = args.aspect
-        subprocess.run([sys.executable, "render.py", "still", "2.0", "15.0", "25.0", "36.0", "52.0"], env=env)
+        subprocess.run([sys.executable, "render.py", "still", "3.0", "15.0", "25.0", "35.0", "65.0"], env=env)
         return
         
     if args.command == "build":
@@ -175,7 +175,7 @@ def main():
             run_mix()
             
         if args.aspect == "all":
-            for asp in ["16:9", "9:16", "1:1"]:
+            for asp in ["16:9", "9:16", "1:1", "4:5"]:
                 render_aspect(aspect=asp, workers=args.workers)
         else:
             render_aspect(aspect=args.aspect, workers=args.workers)

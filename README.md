@@ -4,42 +4,55 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)](LICENSE)
 [![Audio: 48kHz Stereo](https://img.shields.io/badge/Audio-48kHz%20Stereo-00e676.svg)](mix.py)
 [![Official Website](https://img.shields.io/badge/ALGENZA-algenza.com-70e0d6.svg)](https://algenza.com)
-[![Aspect Ratios](https://img.shields.io/badge/Formats-16%3A9%20%7C%209%3A16%20%7C%201%3A1-f49097.svg)](cli.py)
+[![Aspect Ratios](https://img.shields.io/badge/Formats-16%3A9%20%7C%209%3A16%20%7C%201%3A1%20%7C%204%3A5-00E5FF.svg)](cli.py)
 
-A programmatic explainer video engine engineered specifically for **[ALGENZA](https://algenza.com)**: every frame, neural voiceover, synthesized cyber-quant soundtrack, and procedural sound effect is generated entirely by Python code — with **no manual video editor and no stock footage**.
+A programmatic 60 FPS video generation engine engineered specifically for **[ALGENZA](https://algenza.com)**: every frame, neural voiceover, synthesized cyber-quant soundtrack, and procedural sound effect is generated entirely by Python code — with **no manual video editor and no stock footage**.
 
-Built for multi-platform social media distribution, it renders native formats for **YouTube (16:9)**, **TikTok / Instagram Reels / YouTube Shorts (9:16)**, and **LinkedIn / Twitter (1:1)**.
-
----
-
-## 📺 Video Previews & Output Specifications
-
-| Format | Resolution | Framerate | Target Platform | Generated Asset |
-|---|---|---|---|---|
-| **Widescreen Landscape** | 1920×1080 (16:9) | 60 fps | YouTube, Website Hero, Pitch Decks | `assets/algenza-explainer-16x9.mp4` |
-| **Mobile Vertical** | 1080×1920 (9:16) | 60 fps | TikTok, Instagram Reels, Shorts | `assets/algenza-explainer-9x16.mp4` |
-| **Square Feed** | 1080×1080 (1:1) | 60 fps | LinkedIn, Twitter / X, Instagram Feed | `assets/algenza-explainer-1x1.mp4` |
+Built for multi-platform social media distribution, it renders native formats for **YouTube (16:9)**, **TikTok / Instagram Reels / YouTube Shorts (9:16)**, **Instagram / LinkedIn Feed (1:1)**, and **Instagram Portrait Feed (4:5)**.
 
 ---
 
-## 🏛️ Architecture & Pipeline
+## 📺 Multi-Format Video Specifications
+
+| Format | Aspect Ratio | Resolution | Framerate | Target Platform | Output Asset |
+|---|---|---|---|---|---|
+| **Landscape** | `16:9` | 1920×1080 | 60 fps | YouTube, Website Hero, Pitch Decks | `assets/algenza-explainer-16x9.mp4` |
+| **Vertical** | `9:16` | 1080×1920 | 60 fps | TikTok, Instagram Reels, YouTube Shorts | `assets/algenza-explainer-9x16.mp4` |
+| **Square** | `1:1` | 1080×1080 | 60 fps | Instagram Feed, LinkedIn, Twitter / X | `assets/algenza-explainer-1x1.mp4` |
+| **Portrait** | `4:5` | 1080×1350 | 60 fps | Instagram Feed (Tall), Facebook Feed | `assets/algenza-explainer-4x5.mp4` |
+
+---
+
+## 🤖 The ALGENZA Mascot: Cyber-Quant Trader
+
+The engine features a distinctive, branded character:
+- **Chassis & Body**: Aerodynamic rounded-capsule chassis in vibrant Algenza Emerald (`#3FCB90`) with dark titanium flank armor plates (`#10221A`) and glowing cyan pinstripes (`#00E5FF`).
+- **Cyber Visor & Digital Eyes**: High-tech curved visor plate housing digital smart eyes with tracking pupils, blinking every 3.7s, worried angled brows in Scene 1, and joyful arcs (`^ ^`) in Scenes 2, 7, and 8.
+- **Audio-Reactive Mouth**: Dynamic lip-sync directly modulated by voice speech envelope (`mouth.npy`), transitioning to a warm smile arc when resting.
+- **Quantum Antenna & Ion Stabilizer**: Pulsing cyan/emerald signal antenna on top and dual-fin anti-gravity stabilizer at bottom.
+- **Articulated Cyber Arms**: Pointing at charts and code panels with precision, waving enthusiastically in Scene 2 and Scene 8.
+- **Blueprint Construction (Scene 0)**: Procedural assembly with compass sweeps, caliper dashed lines, coordinate crosshairs, and laser path tracing.
+
+---
+
+## 🏛️ Engine Architecture & Pipeline
 
 ```mermaid
 flowchart LR
-    A["tl.py<br/>(Script & Timelines)"] --> B["tts.py<br/>(Edge Neural / Kokoro)"]
+    A["tl.py<br/>(Script & Timelines)"] --> B["tts.py<br/>(Edge Neural Voice)"]
     B --> C["mix.py<br/>(Audio & SFX Mix)"]
-    C --> D["render.py<br/>(Multi-Aspect Renderer)"]
-    D --> E["FFmpeg<br/>(H.264 / AAC Muxer)"]
-    E --> F["assets/*.mp4<br/>(16:9, 9:16, 1:1)"]
+    C --> D["render.py<br/>(Multi-Aspect 60fps Renderer)"]
+    D --> E["FFmpeg Concat & Muxer<br/>(H.264 / AAC -16 LUFS)"]
+    E --> F["assets/*.mp4<br/>(16:9, 9:16, 1:1, 4:5)"]
 ```
 
 | Component | File | Description |
 |---|---|---|
-| **Script & Dynamic Timeline** | `tl.py` | Defines the 9 narrative scenes. Edit `LINES` to alter narration; all scene cue points, transitions, and camera math adapt automatically. |
-| **Studio Neural Voice** | `tts.py` | Generates authoritative voiceover using Microsoft Edge Neural TTS (`en-US-ChristopherNeural` / `en-US-GuyNeural`) with Kokoro-ONNX and custom WAV fallback. |
+| **Script & Dynamic Timeline** | `tl.py` | Defines the 9 narrative scenes. Edit `LINES` to alter narration; all scene cue points, camera zooms, and sound events adapt automatically. |
+| **Studio Neural Voice** | `tts.py` | Generates authoritative voiceover using Microsoft Edge Neural TTS (`en-US-ChristopherNeural` / `en-US-GuyNeural`) with local fallbacks. |
 | **Soundtrack & Sound Design** | `mix.py` | Synthesizes a progressive cyber-quant electronic soundtrack, procedural SFX (ticks, dings, whooshes, sub-bass booms), speech ducking, and `mouth.npy` for lip-sync. |
-| **Universal Frame Renderer** | `render.py` | High-performance graphics renderer with responsive framing for 16:9, 9:16, and 1:1. Features the ALGENZA polygonal logo, Candlestick engine, and Quant Sentinel HUD. |
-| **Multi-Platform CLI** | `cli.py` | Orchestrates single-command compilation for specific aspect ratios or all social formats simultaneously. |
+| **Multi-Format Frame Renderer** | `render.py` | High-performance 60fps graphics renderer powered by pure-Python Skia engine with zero native crashes on Windows. |
+| **Multi-Platform CLI** | `cli.py` | Orchestrates parallel multi-worker rendering, audio muxing, and format exports. |
 | **Interactive Dashboard** | `index.html` & `server.py` | Glassmorphic web control center to preview scenes, test audio stems, and watch renders. |
 | **1-Click Build Scripts** | `build.ps1`, `build.bat`, `build.sh` | Automated native runners for Windows PowerShell, Windows Batch, and Linux/macOS. |
 
@@ -62,15 +75,18 @@ pip install -r requirements.txt
 
 #### On Windows (PowerShell):
 ```powershell
+# Render YouTube Widescreen (16:9)
 .\build.ps1
-```
-Or for all aspect ratios:
-```powershell
+
+# Or render all 4 formats (16:9, 9:16, 1:1, 4:5)
 .\build.ps1 -All
 ```
 
-#### On Windows (Double-Click Batch):
-Double click `build.bat` in File Explorer.
+#### On Windows (Command Prompt / Double Click):
+```cmd
+build.bat 16:9
+```
+Or double-click `build.bat` in File Explorer.
 
 #### On Linux / macOS / Docker:
 ```bash
@@ -85,38 +101,44 @@ chmod +x build.sh
 The `cli.py` script provides fine-grained control over exports:
 
 ```bash
-# Display timeline breakdown and scene cue points
+# Display narrative script timeline and scene timestamps
 python cli.py info
 
-# Render for YouTube (16:9 Landscape)
-python cli.py build --aspect 16:9
+# Render for YouTube (16:9 Landscape - 1920x1080)
+python cli.py build --aspect 16:9 --workers 4
 
-# Render for TikTok / Reels / Shorts (9:16 Vertical)
-python cli.py build --aspect 9:16
+# Render for TikTok / Reels / Shorts (9:16 Vertical - 1080x1920)
+python cli.py build --aspect 9:16 --workers 4
 
-# Render for LinkedIn / Instagram Feed (1:1 Square)
-python cli.py build --aspect 1:1
+# Render for LinkedIn / Instagram (1:1 Square - 1080x1080)
+python cli.py build --aspect 1:1 --workers 4
 
-# Render all platforms in parallel
+# Render for Instagram / Facebook Feed (4:5 Portrait - 1080x1350)
+python cli.py build --aspect 4:5 --workers 4
+
+# Render all 4 formats in parallel
 python cli.py build --aspect all --workers 4
 
 # Preview still frame snapshots (generates PNG stills across scenes)
 python cli.py preview --aspect 16:9
+python cli.py preview --aspect 9:16
+python cli.py preview --aspect 1:1
+python cli.py preview --aspect 4:5
 ```
 
 ---
 
 ## 🎬 The 9 Narrative Scenes
 
-1. **Scene 0 (0.0s – 4.3s) · You Have a Strategy**: Institutional Gold (XAUUSD) candlestick chart with real-time volatility moving average.
-2. **Scene 1 (4.3s – 10.6s) · The Trader's Dilemma**: Fast-scrolling order flow wave, 24/7 global market liquidity pressure, and missed entry alerts.
-3. **Scene 2 (10.6s – 17.7s) · ALGENZA Brand Reveal**: Signature dual-chevron geometric polygon assembly, electric cyan/rose shockwave, and sub-bass boom.
-4. **Scene 3 (17.7s – 25.7s) · Algorithm Ecosystem**: 4 interactive glassmorphic cards showcasing *Apex Scalper Pro*, *Titan Grid Engine*, *Prop Risk Guard 360*, and *FIX API & Python Bridge*.
-5. **Scene 4 (25.7s – 32.5s) · The 5-Step Quant Pipeline**: Interactive node graph tracking *Rules &rarr; MQL5 Code &rarr; 99.9% Real Tick Backtest &rarr; FIX API &rarr; Live Verified Execution*.
-6. **Scene 5 (32.5s – 39.0s) · Prop-Firm Risk Guardians**: Daily loss gauges, FTMO pass shield, and smartphone mockup with live Telegram/Discord execution pings.
-7. **Scene 6 (39.0s – 47.5s) · 100% Proprietary Code**: Deployment package file tree with verified architecture checkmarks and direct developer support.
-8. **Scene 7 (47.5s – 54.1s) · Proven Track Record**: Dynamic counters displaying **200+ Delivered**, **$12M+ Volume**, **99.4% Win Rate**, and 5.0 Golden Stars.
-9. **Scene 8 (54.1s – 68.0s) · High-Converting Call to Action**: Glowing CTA button directing viewers to **algenza.com** with direct WhatsApp contact.
+1. **Scene 0 (0.0s – 4.3s) · You Have a Strategy**: Institutional Gold (XAUUSD) candlestick chart with real-time volatility moving average and mascot blueprint assembly.
+2. **Scene 1 (4.3s – 10.6s) · The Trader's Dilemma**: Fast-scrolling order flow wave, 24/7 global market liquidity clock, missed entry alerts, and worried mascot expression.
+3. **Scene 2 (10.6s – 17.7s) · ALGENZA Brand Reveal**: Glowing ALGENZA logo drop, cinematic laser sweep, and mascot welcoming wave.
+4. **Scene 3 (17.7s – 25.7s) · Algorithm Ecosystem**: Responsive cards showcasing *MT4/MT5 Expert Advisors*, *IBKR API*, and *Crypto Exchange Bots*.
+5. **Scene 4 (25.7s – 32.5s) · The 5-Step Quant Pipeline**: Interactive node graph tracking *Rules &rarr; Code &rarr; Real Tick Backtest &rarr; Broker API &rarr; Live Verified Execution*.
+6. **Scene 5 (32.5s – 39.0s) · Risk Management Built In**: Strict loss gauges (Max daily loss, 1% risk per trade) and smartphone mockup with live Telegram/Discord alerts.
+7. **Scene 6 (39.0s – 47.5s) · No Black Box**: Deployment package directory tree with verified architecture checkmarks and direct developer support.
+8. **Scene 7 (47.5s – 54.1s) · Proven in Production**: Dynamic counters displaying **200+ Delivered**, **4.9 Client Rating**, and 5 Golden Stars.
+9. **Scene 8 (54.1s – 68.0s) · High-Converting Call to Action**: Glowing CTA button directing viewers to **algenza.com**.
 
 ---
 
@@ -124,18 +146,18 @@ python cli.py preview --aspect 16:9
 
 | Token | Hex | Usage |
 |---|---|---|
-| `bg` | `#050b14` | Deep Navy Quant Space Background |
-| `panel` | `#0c1524` | Glassmorphic Cards & UI Containers |
-| `border` | `#1b2940` | Subtle Cyber Borders & Grid Lines |
-| `teal` | `#70e0d6` | Primary Brand Color (Left Chevron Polygon) |
-| `rose` | `#f49097` | Secondary Brand Color (Right Chevron Polygon) |
-| `gold` | `#ffd700` | XAUUSD Gold Scalper & Rating Stars |
-| `green` | `#00e676` | Verified Pass Rate & Profit Fills |
-| `blue` | `#38bdf8` | FIX Protocol & Microsecond Latency |
+| `G` (Emerald) | `#3FCB90` | Primary Algenza Brand Color, Bullish Candles, Mascot Armor |
+| `CYAN` | `#00E5FF` | Quantum Accents, Sensor LEDs, Visor Contours |
+| `WH` (White) | `#F1F3F6` | Primary Headings, Text Labels, Arm Nodes |
+| `MU` (Slate) | `#8B9A92` | Subtitles, Muted Grid Lines, Code Comments |
+| `RD` (Red) | `#EF4444` | Missed Entry Alerts, Bearish Candles |
+| `PN` (Panel) | `#11151C` | Deep Glassmorphic Cards & UI Containers |
+| `LN` (Border) | `#252C38` | Subtle Cyber Borders & Division Rings |
+| `DK` (Dark) | `#07251A` | Visor Interior, Pupils, Mouth Cavity |
 
 ---
 
-## 🌐 Live Web Preview Dashboard
+## 🌐 Live Web Showcase Dashboard
 
 Launch the built-in local showcase dashboard to preview the generated video and inspect audio stems:
 
